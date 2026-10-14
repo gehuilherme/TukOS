@@ -452,3 +452,139 @@ fn spawn_pe_inner(image: &[u8], load_base: u64) -> (usize, u64) {
     let id = crate::sched::spawn_user(space, entry, stack_va + 4096, kstack, teb_va);
     (id, teb_va)
 }
+
+/// Builds the TukOS test `.exe` that imports `ntdll.dll!NtWriteFile` and
+/// `NtTerminateProcess` and calls both through the IAT.
+///
+/// Layout: `.text` RVA 0x1000 (R+X), `.data` RVA 0x2000 (R+W) holding, at
+/// data offsets: import descriptors 0x00 (+null terminator), INT 0x40, IAT 0x60
+/// (slot0 NtWriteFile @0x60, slot1 NtTerminateProcess @0x68), "ntdll.dll" 0x80,
+/// hint/name entries 0x90 and 0xA0, msg 0xC0 and IO_STATUS_BLOCK 0xD0.
+pub fn build_exe_importing_ntdll() -> alloc::vec::Vec<u8> {
+    const OPT_SIZE: usize = 112 + 16 * 8;
+    const TEXT_RVA: u32 = 0x1000;
+    const DATA_RVA: u32 = 0x2000;
+    const DATA_RAW_OFF: usize = 0x400;
+    let slot_write = DATA_RVA + 0x60;
+    let slot_term = DATA_RVA + 0x68;
+    let msg_rva = DATA_RVA + 0xC0;
+    let iosb_rva = DATA_RVA + 0xD0;
+
+    // Appends an instruction ending in a rip-relative disp32 and patches it:
+    // disp = target_rva - rva_of_next_instruction.
+    fn rip_rel(code: &mut alloc::vec::Vec<u8>, opcode: &[u8], target: u32) {
+        code.extend_from_slice(opcode);
+        let next = TEXT_RVA + code.len() as u32 + 4;
+        code.extend_from_slice(&(target.wrapping_sub(next) as i32).to_le_bytes());
+    }
+
+    let mut c = alloc::vec::Vec::new();
+    c.extend_from_slice(&[0x48, 0x83, 0xEC, 0x50]); // sub rsp, 0x50 (32 shadow + 5 args, aligned)
+    rip_rel(&mut c, &[0x48, 0x8D, 0x05], iosb_rva); // lea rax, [rip+iosb]
+    c.extend_from_slice(&[0x48, 0x89, 0x44, 0x24, 0x20]); // [rsp+0x20] = IoStatusBlock
+    rip_rel(&mut c, &[0x48, 0x8D, 0x05], msg_rva); // lea rax, [rip+msg]
+    c.extend_from_slice(&[0x48, 0x89, 0x44, 0x24, 0x28]); // [rsp+0x28] = Buffer
+    c.extend_from_slice(&[0x48, 0xC7, 0x44, 0x24, 0x30, 6, 0, 0, 0]); // Length = 6
+    c.extend_from_slice(&[0x48, 0xC7, 0x44, 0x24, 0x38, 0, 0, 0, 0]); // ByteOffset = 0
+    c.extend_from_slice(&[0x48, 0xC7, 0x44, 0x24, 0x40, 0, 0, 0, 0]); // Key = 0
+    c.extend_from_slice(&[0xB9, 4, 0, 0, 0]); // mov ecx, CONSOLE_HANDLE
+    c.extend_from_slice(&[0x31, 0xD2]); // xor edx, edx
+    c.extend_from_slice(&[0x45, 0x31, 0xC0]); // xor r8d, r8d
+    c.extend_from_slice(&[0x45, 0x31, 0xC9]); // xor r9d, r9d
+    rip_rel(&mut c, &[0xFF, 0x15], slot_write); // call [rip+IAT NtWriteFile]
+    c.extend_from_slice(&[0x31, 0xC9]); // xor ecx, ecx
+    rip_rel(&mut c, &[0xFF, 0x15], slot_term); // call [rip+IAT NtTerminateProcess]
+    c.extend_from_slice(&[0x0F, 0x0B]); // ud2
+
+    let mut d = alloc::vec![0u8; 0xE0];
+    put(&mut d, 0, &(DATA_RVA + 0x40).to_le_bytes()); // OriginalFirstThunk
+    put(&mut d, 12, &(DATA_RVA + 0x80).to_le_bytes()); // Name
+    put(&mut d, 16, &(DATA_RVA + 0x60).to_le_bytes()); // FirstThunk
+    for base in [0x40usize, 0x60] {
+        put(&mut d, base, &u64::from(DATA_RVA + 0x90).to_le_bytes());
+        put(&mut d, base + 8, &u64::from(DATA_RVA + 0xA0).to_le_bytes());
+    }
+    put(&mut d, 0x80, b"ntdll.dll\0");
+    put(&mut d, 0x92, b"NtWriteFile\0");
+    put(&mut d, 0xA2, b"NtTerminateProcess\0");
+    put(&mut d, 0xC0, b"TukOS\n");
+
+    let text_raw = PE_RAW_OFF;
+    let mut v = alloc::vec![0u8; DATA_RAW_OFF + d.len()];
+    put(&mut v, 0, &0x5A4Du16.to_le_bytes());
+    put(&mut v, 0x3C, &0x40u32.to_le_bytes());
+    put(&mut v, 0x40, &0x0000_4550u32.to_le_bytes());
+    let coff = 0x44;
+    put(&mut v, coff, &0x8664u16.to_le_bytes());
+    put(&mut v, coff + 2, &2u16.to_le_bytes());
+    put(&mut v, coff + 16, &(OPT_SIZE as u16).to_le_bytes());
+    let opt = coff + 20;
+    put(&mut v, opt, &0x20Bu16.to_le_bytes());
+    put(&mut v, opt + 16, &TEXT_RVA.to_le_bytes());
+    put(&mut v, opt + 24, &PE_IMAGE_BASE.to_le_bytes());
+    put(&mut v, opt + 56, &0x3000u32.to_le_bytes());
+    put(&mut v, opt + 108, &16u32.to_le_bytes());
+    put(&mut v, opt + 112 + 8, &DATA_RVA.to_le_bytes()); // import dir
+    put(&mut v, opt + 112 + 12, &0x28u32.to_le_bytes());
+    let s = opt + OPT_SIZE;
+    put(&mut v, s, b".text\0\0\0");
+    put(&mut v, s + 8, &(c.len() as u32).to_le_bytes());
+    put(&mut v, s + 12, &TEXT_RVA.to_le_bytes());
+    put(&mut v, s + 16, &(c.len() as u32).to_le_bytes());
+    put(&mut v, s + 20, &(text_raw as u32).to_le_bytes());
+    put(&mut v, s + 36, &SCN_CODE_EXEC_READ.to_le_bytes());
+    let s2 = s + 40;
+    put(&mut v, s2, b".data\0\0\0");
+    put(&mut v, s2 + 8, &(d.len() as u32).to_le_bytes());
+    put(&mut v, s2 + 12, &DATA_RVA.to_le_bytes());
+    put(&mut v, s2 + 16, &(d.len() as u32).to_le_bytes());
+    put(&mut v, s2 + 20, &(DATA_RAW_OFF as u32).to_le_bytes());
+    put(&mut v, s2 + 36, &SCN_DATA_RW.to_le_bytes());
+    put(&mut v, text_raw, &c);
+    put(&mut v, DATA_RAW_OFF, &d);
+    v
+}
+
+const NTDLL_LOAD_BASE: u64 = 0x1000_0000;
+
+/// Loads the test `.exe` plus the embedded ntdll into one address space,
+/// resolves the exe's imports and starts a user thread at the exe entry.
+/// Does nothing when the ntdll is not embedded.
+pub fn spawn_exe_with_ntdll() {
+    let nt = crate::ntdll_image::NTDLL_BYTES;
+    if nt.is_empty() {
+        return;
+    }
+    let exe = build_exe_importing_ntdll();
+    let space = AddressSpace::new_user();
+    let entry = crate::loader::load_pe(&space, &exe, PE_IMAGE_BASE).expect("load exe");
+    crate::loader::load_pe(&space, nt, NTDLL_LOAD_BASE).expect("load ntdll");
+    crate::loader::resolve_imports(&space, &exe, PE_IMAGE_BASE, nt, NTDLL_LOAD_BASE)
+        .expect("resolve imports");
+    let stack_va = crate::loader::image_top(nt, NTDLL_LOAD_BASE).expect("image_top") + 4096;
+    let stack_phys = crate::mem::frames::alloc_frame().expect("sem frame p/ pilha");
+    unsafe {
+        space
+            .map(
+                stack_va,
+                stack_phys,
+                PageFlags::USER
+                    .union(PageFlags::WRITABLE)
+                    .union(PageFlags::NO_EXECUTE),
+            )
+            .expect("map pilha");
+    }
+    let teb_va = stack_va + 2 * 4096;
+    let peb_va = stack_va + 3 * 4096;
+    crate::teb::setup(
+        &space,
+        teb_va,
+        peb_va,
+        PE_IMAGE_BASE,
+        stack_va + 4096,
+        stack_va,
+    )
+    .expect("teb setup");
+    let kstack = alloc::vec![0u8; KSTACK_SIZE].into_boxed_slice();
+    crate::sched::spawn_user(space, entry, stack_va + 4096, kstack, teb_va);
+}

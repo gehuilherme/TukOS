@@ -71,6 +71,7 @@ const TESTS: &[(&str, TestFn)] = &[
     ("nt_terminate_exits_and_reaps", nt_terminate_exits_and_reaps),
     ("ntwritefile_fills_iosb", ntwritefile_fills_iosb),
     ("ntwritefile_bad_handle", ntwritefile_bad_handle),
+    ("exe_imports_ntdll_and_runs", exe_imports_ntdll_and_runs),
     ("two_user_processes_preempt", two_user_processes_preempt),
     ("reloc_dir64_crosses_page", reloc_dir64_crosses_page),
     ("stack_placed_above_image", stack_placed_above_image),
@@ -897,6 +898,28 @@ fn ntwritefile_bad_handle() -> Result<(), &'static str> {
         return Err("handle invalido nao deveria escrever");
     }
     Ok(())
+}
+
+fn exe_imports_ntdll_and_runs() -> Result<(), &'static str> {
+    use core::sync::atomic::Ordering;
+    if crate::ntdll_image::NTDLL_BYTES.is_empty() {
+        return Ok(()); // ntdll not embedded on this host: skip.
+    }
+    crate::syscall::LAST_WRITE_LEN.store(0, Ordering::SeqCst);
+    let before = crate::mem::frames::free_frame_count();
+    crate::process::spawn_exe_with_ntdll();
+    for _ in 0..12000 {
+        crate::sched::yield_now();
+        if crate::syscall::LAST_WRITE_LEN.load(Ordering::SeqCst) == 6
+            && crate::syscall::last_write_is(b"TukOS\n")
+        {
+            // and it should have exited and been reaped.
+            if crate::mem::frames::free_frame_count() == before {
+                return Ok(());
+            }
+        }
+    }
+    Err("o .exe que importa ntdll nao rodou/saiu")
 }
 
 fn two_user_processes_preempt() -> Result<(), &'static str> {
