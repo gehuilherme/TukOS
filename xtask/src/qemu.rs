@@ -28,6 +28,17 @@ pub fn headless(ci: Option<&str>, tukos_headless: Option<&str>) -> bool {
     ci.is_some_and(|v| !v.is_empty()) || tukos_headless == Some("1")
 }
 
+/// `-display none` when running headless (CI or `TUKOS_HEADLESS=1`), otherwise nothing.
+fn display_args() -> &'static [&'static str] {
+    let ci = std::env::var("CI").ok();
+    let forced = std::env::var("TUKOS_HEADLESS").ok();
+    if headless(ci.as_deref(), forced.as_deref()) {
+        &["-display", "none"]
+    } else {
+        &[]
+    }
+}
+
 pub fn first_existing(candidates: &[PathBuf]) -> Option<PathBuf> {
     candidates.iter().find(|p| p.is_file()).cloned()
 }
@@ -132,6 +143,7 @@ pub fn run_interactive(esp: &Path) -> crate::Result<()> {
     let ovmf = find_ovmf(&qemu)?;
     let status = Command::new(&qemu)
         .args(base_args(&ovmf, esp))
+        .args(display_args())
         .status()
         .map_err(|e| format!("falha ao iniciar {}: {e}", qemu.display()))?;
     match outcome_from_exit_code(status.code()) {
@@ -143,17 +155,10 @@ pub fn run_interactive(esp: &Path) -> crate::Result<()> {
 pub fn run_captured(esp: &Path, timeout: Duration) -> crate::Result<(Outcome, String)> {
     let qemu = find_qemu()?;
     let ovmf = find_ovmf(&qemu)?;
-    let ci = std::env::var("CI").ok();
-    let forced = std::env::var("TUKOS_HEADLESS").ok();
-    let display_args: &[&str] = if headless(ci.as_deref(), forced.as_deref()) {
-        &["-display", "none"]
-    } else {
-        &[]
-    };
     let mut child = Command::new(&qemu)
         .args(base_args(&ovmf, esp))
         .args(["-monitor", "none"])
-        .args(display_args)
+        .args(display_args())
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit())
         .spawn()
