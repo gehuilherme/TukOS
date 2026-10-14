@@ -10,6 +10,13 @@ const TEB_SELF: usize = 0x30; // NT_TIB.Self
 const TEB_PEB: usize = 0x60; // TEB.ProcessEnvironmentBlock
 const PEB_IMAGE_BASE: usize = 0x10; // PEB.ImageBaseAddress
 const PEB_LDR: usize = 0x18; // PEB.Ldr
+const PEB_PROCESS_PARAMETERS: usize = 0x20; // PEB.ProcessParameters
+// RTL_USER_PROCESS_PARAMETERS (public winternl.h layout).
+const PARAMS_MAXIMUM_LENGTH: usize = 0x00;
+const PARAMS_LENGTH: usize = 0x04;
+const PARAMS_STANDARD_OUTPUT: usize = 0x28;
+const PARAMS_STANDARD_ERROR: usize = 0x30;
+const PARAMS_SIZE: u32 = 0x80;
 // PEB_LDR_DATA (public winternl.h layout).
 const LDR_LENGTH: usize = 0x00;
 const LDR_INITIALIZED: usize = 0x04;
@@ -132,6 +139,32 @@ pub fn setup_ldr(
     unsafe {
         ((crate::mem::frames::phys_to_virt(peb_phys) as *mut u8).add(PEB_LDR) as *mut u64)
             .write(ldr_va);
+    }
+    Ok(())
+}
+
+/// Maps a page at `params_va` holding an `RTL_USER_PROCESS_PARAMETERS` whose
+/// `StandardOutput`/`StandardError` are `console` (stdin stays 0), then points
+/// `PEB.ProcessParameters` (PEB at `peb_va`) at it. This is where a program that
+/// does not link kernel32 finds its stdout handle, as on real Windows.
+pub fn setup_process_parameters(
+    space: &AddressSpace,
+    params_va: u64,
+    peb_va: u64,
+    console: u64,
+) -> Result<(), ()> {
+    let page = map_zeroed_page(space, params_va)?;
+    unsafe {
+        (page.add(PARAMS_MAXIMUM_LENGTH) as *mut u32).write(PARAMS_SIZE);
+        (page.add(PARAMS_LENGTH) as *mut u32).write(PARAMS_SIZE);
+        (page.add(PARAMS_STANDARD_OUTPUT) as *mut u64).write(console);
+        (page.add(PARAMS_STANDARD_ERROR) as *mut u64).write(console);
+    }
+    let peb_phys = space.translate(peb_va).ok_or(())?;
+    unsafe {
+        ((crate::mem::frames::phys_to_virt(peb_phys) as *mut u8).add(PEB_PROCESS_PARAMETERS)
+            as *mut u64)
+            .write(params_va);
     }
     Ok(())
 }

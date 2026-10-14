@@ -4,6 +4,7 @@ fn main() {
     let dir = std::env::var("CARGO_MANIFEST_DIR").unwrap();
     println!("cargo:rustc-link-arg-bins=-T{dir}/linker.ld");
     println!("cargo:rerun-if-changed=linker.ld");
+    embed_conformance(&dir);
 
     // Embed the ntdll.dll produced by `cargo xtask ntdll` (we only copy the
     // artifact: no nested cargo, so no target-lock contention). If it is
@@ -22,5 +23,19 @@ fn main() {
             "cargo:warning=ntdll.dll not found; embedding empty (run `cargo xtask ntdll` on Windows)"
         );
         std::fs::write(&out, []).expect("write empty ntdll.dll");
+    }
+}
+
+// Embed the conformance program built by `cargo xtask conformance` (empty if absent).
+fn embed_conformance(dir: &str) {
+    let out = PathBuf::from(std::env::var("OUT_DIR").unwrap()).join("conformance.exe");
+    let src = PathBuf::from(dir)
+        .join("..")
+        .join("target")
+        .join("conformance")
+        .join("hello.exe");
+    println!("cargo:rerun-if-changed={}", src.display());
+    if std::fs::copy(&src, &out).is_err() {
+        std::fs::write(&out, []).expect("write empty conformance.exe");
     }
 }

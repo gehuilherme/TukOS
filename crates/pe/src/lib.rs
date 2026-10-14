@@ -19,6 +19,7 @@ const SECTION_HEADER_SIZE: usize = 40;
 const RELOC_DIR_INDEX: usize = 5;
 const EXPORT_DIR_INDEX: usize = 0;
 const IMPORT_DIR_INDEX: usize = 1;
+const IAT_DIR_INDEX: usize = 12;
 const IMPORT_DESC_SIZE: usize = 20;
 const EXPORT_DIR_SIZE: usize = 40;
 const ORDINAL_FLAG: u64 = 1 << 63;
@@ -441,6 +442,13 @@ impl<'a> PeFile<'a> {
                 index: 0,
             },
         }))
+    }
+
+    /// `(rva, size)` of the Import Address Table directory (data directory 12);
+    /// `(0, 0)` when absent. MSVC places the IAT in a read-only `.rdata`, so a
+    /// loader makes exactly this range writable while binding imports.
+    pub fn iat_directory(&self) -> (u32, u32) {
+        self.data_dir(IAT_DIR_INDEX)
     }
 
     /// Iterates the import directory (data directory 1). The whole table is

@@ -4,6 +4,8 @@
 mod apic;
 #[macro_use]
 mod console;
+#[cfg(feature = "conformance")]
+mod conformance;
 mod fbcon;
 #[cfg(feature = "ktest")]
 mod ktest;
@@ -94,6 +96,9 @@ unsafe extern "C" fn kmain() -> ! {
 
     #[cfg(feature = "ktest")]
     ktest::run_all();
+
+    #[cfg(feature = "conformance")]
+    conformance::run();
 
     #[cfg(feature = "ktest-panic")]
     {

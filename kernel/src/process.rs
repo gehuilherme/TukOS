@@ -609,6 +609,7 @@ pub fn build_exe_ntdll_space_with(exe: alloc::vec::Vec<u8>) -> ExeSpace {
     let teb_va = stack_va + 2 * 4096;
     let peb_va = stack_va + 3 * 4096;
     let ldr_va = stack_va + 4 * 4096;
+    let params_va = stack_va + 5 * 4096;
     crate::teb::setup(
         &space,
         teb_va,
@@ -638,6 +639,8 @@ pub fn build_exe_ntdll_space_with(exe: alloc::vec::Vec<u8>) -> ExeSpace {
         ],
     )
     .expect("ldr setup");
+    crate::teb::setup_process_parameters(&space, params_va, peb_va, crate::object::CONSOLE_HANDLE)
+        .expect("process parameters setup");
     ExeSpace {
         space,
         exe,

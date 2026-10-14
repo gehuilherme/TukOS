@@ -96,15 +96,22 @@ pub fn load_pe(space: &AddressSpace, image: &[u8], load_base: u64) -> Result<u64
         }
     }
 
+    // MSVC puts the IAT in a read-only section; like the Windows loader, make the
+    // pages holding the IAT directory writable (never executable) so imports can
+    // be bound. Pages of executable sections are never made writable.
+    let (iat_rva, iat_size) = pe.iat_directory();
+    let iat_start = u64::from(iat_rva);
+    let iat_end = iat_start + u64::from(iat_size);
+
     for sec in pe.sections() {
         let (writable, exec) = characteristics_to_flags(sec.characteristics);
-        let mut flags = PageFlags::USER;
-        if writable {
-            flags = flags.union(PageFlags::WRITABLE);
-        }
-        if !exec {
-            flags = flags.union(PageFlags::NO_EXECUTE);
-        }
+        let base_flags = {
+            let mut f = PageFlags::USER;
+            if !exec {
+                f = f.union(PageFlags::NO_EXECUTE);
+            }
+            f
+        };
         let pages = (sec.virtual_size as u64).div_ceil(PAGE).max(1);
         let sec_base = load_base
             .checked_add(sec.rva as u64)
@@ -116,6 +123,13 @@ pub fn load_pe(space: &AddressSpace, image: &[u8], load_base: u64) -> Result<u64
                 .ok_or(LoadError::Overflow)?;
             let frame = alloc_frame().ok_or(LoadError::Alloc)?;
             let dst = phys_to_virt(frame) as *mut u8;
+            let page_rva = u64::from(sec.rva) + p * PAGE;
+            let holds_iat = iat_size != 0 && page_rva < iat_end && page_rva + PAGE > iat_start;
+            let flags = if writable || (holds_iat && !exec) {
+                base_flags.union(PageFlags::WRITABLE)
+            } else {
+                base_flags
+            };
             // Zero the whole page first (covers .bss slack), then copy raw bytes
             // through the HHDM alias; the user mapping carries the final W^X flags.
             unsafe {

@@ -9,7 +9,7 @@
 #![allow(non_snake_case)]
 
 use core::panic::PanicInfo;
-use pe::{PeFile, SCN_MEM_WRITE};
+use pe::{PeFile, SCN_MEM_EXECUTE, SCN_MEM_WRITE};
 
 /// A panic can only come from a latent bug; never unwind, just end the process.
 #[panic_handler]
@@ -210,10 +210,19 @@ fn iat_slot_ok(exe: &PeFile, size_of_image: u64, rva: u32) -> bool {
     if end > size_of_image {
         return false;
     }
+    // A slot is acceptable inside a writable, non-executable section, or inside the
+    // exe's declared IAT directory in a non-executable section (MSVC's read-only
+    // `.rdata` IAT; the kernel maps those pages writable, as the Windows loader does).
+    let (iat_rva, iat_size) = exe.iat_directory();
+    let iat_start = u64::from(iat_rva);
+    let iat_end = iat_start + u64::from(iat_size);
+    let in_iat_dir = iat_size != 0 && start >= iat_start && end <= iat_end;
     exe.sections().any(|s| {
         let s_start = u64::from(s.rva);
         let s_end = s_start + u64::from(s.virtual_size);
-        s.characteristics & SCN_MEM_WRITE != 0 && start >= s_start && end <= s_end
+        let inside = start >= s_start && end <= s_end;
+        let exec = s.characteristics & SCN_MEM_EXECUTE != 0;
+        inside && !exec && (s.characteristics & SCN_MEM_WRITE != 0 || in_iat_dir)
     })
 }
 
