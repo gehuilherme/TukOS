@@ -141,6 +141,16 @@ pub fn translate_in(root: u64, virt: u64) -> Option<u64> {
 /// leaf) must carry the USER bit, and a HUGE entry at an intermediate level is
 /// rejected (large user pages are unsupported).
 pub fn translate_user_in(root: u64, virt: u64) -> Option<u64> {
+    translate_user_flags_in(root, virt, false)
+}
+
+/// Like [`translate_user_in`] but the leaf must also be WRITABLE (user-copy
+/// write validation: a read-only page yields `None`).
+pub fn translate_user_writable_in(root: u64, virt: u64) -> Option<u64> {
+    translate_user_flags_in(root, virt, true)
+}
+
+fn translate_user_flags_in(root: u64, virt: u64, need_write: bool) -> Option<u64> {
     let idx = page_table_indices(virt);
     let mut table = table_mut(root);
     for &i in &idx[..3] {
@@ -155,14 +165,18 @@ pub fn translate_user_in(root: u64, virt: u64) -> Option<u64> {
         table = table_mut(entry_frame(entry));
     }
     let entry = unsafe { core::ptr::read_volatile(table.add(idx[3])) };
-    if entry_present(entry) && entry_flags(entry).contains(PageFlags::USER) {
+    if !entry_present(entry) {
+        return None;
+    }
+    let f = entry_flags(entry);
+    if f.contains(PageFlags::USER) && (!need_write || f.contains(PageFlags::WRITABLE)) {
         Some(entry_frame(entry) + mm::paging::page_offset(virt))
     } else {
         None
     }
 }
 
-/// ktest helper: marks the PD entry covering a mapped USER page as HUGE and
+///ktest helper: marks the PD entry covering a mapped USER page as HUGE and
 /// checks `translate_user_in` refuses it, then restores the entry.
 #[cfg(feature = "ktest")]
 pub fn test_huge_rejected() -> Result<(), &'static str> {

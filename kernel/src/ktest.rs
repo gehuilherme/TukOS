@@ -79,6 +79,10 @@ const TESTS: &[(&str, TestFn)] = &[
         "translate_user_requires_user_bit",
         translate_user_requires_user_bit,
     ),
+    (
+        "copy_to_user_rejects_readonly_page",
+        copy_to_user_rejects_readonly_page,
+    ),
     ("translate_user_rejects_huge", translate_user_rejects_huge),
     (
         "load_pe_rejects_malformed_without_panic",
@@ -175,6 +179,29 @@ fn translate_user_requires_user_bit() -> Result<(), &'static str> {
     }
     if crate::mem::paging::translate_user_in(space.root(), 0x20_0000).is_some() {
         return Err("pagina sem USER foi aceita (vazamento de kernel)");
+    }
+    Ok(())
+}
+
+fn copy_to_user_rejects_readonly_page() -> Result<(), &'static str> {
+    use crate::mem::space::AddressSpace;
+    use mm::paging::PageFlags;
+    let space = AddressSpace::new_user();
+    let ro = crate::mem::frames::alloc_frame().ok_or("sem frame")?;
+    let rw = crate::mem::frames::alloc_frame().ok_or("sem frame")?;
+    unsafe {
+        space
+            .map(0x10_0000, ro, PageFlags::USER)
+            .map_err(|_| "map ro")?;
+        space
+            .map(0x20_0000, rw, PageFlags::USER.union(PageFlags::WRITABLE))
+            .map_err(|_| "map rw")?;
+    }
+    if crate::mem::paging::translate_user_writable_in(space.root(), 0x10_0000).is_some() {
+        return Err("pagina RO deveria ser rejeitada para escrita");
+    }
+    if crate::mem::paging::translate_user_writable_in(space.root(), 0x20_0000).is_none() {
+        return Err("pagina RW deveria ser aceita para escrita");
     }
     Ok(())
 }

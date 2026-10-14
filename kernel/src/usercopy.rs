@@ -38,7 +38,7 @@ pub fn copy_from_user(va: u64, len: u64) -> Option<Vec<u8>> {
 }
 
 /// Writes `data` to user memory at `va`. Same validation as `copy_from_user`
-/// (lower half, every page mapped with the USER bit); false if any page is
+/// (lower half, every page mapped with USER and WRITABLE); false if any page is
 /// invalid. Pages are checked before any byte is written.
 pub fn copy_to_user(va: u64, data: &[u8]) -> bool {
     let len = data.len() as u64;
@@ -59,7 +59,7 @@ pub fn copy_to_user(va: u64, data: &[u8]) -> bool {
     let mut a = va;
     while a < end {
         let page = a & !(PAGE - 1);
-        if crate::mem::paging::translate_user_in(root, page).is_none() {
+        if crate::mem::paging::translate_user_writable_in(root, page).is_none() {
             return false;
         }
         a = page + PAGE;
@@ -68,7 +68,7 @@ pub fn copy_to_user(va: u64, data: &[u8]) -> bool {
     let mut done = 0usize;
     while a < end {
         let page = a & !(PAGE - 1);
-        let Some(phys) = crate::mem::paging::translate_user_in(root, page) else {
+        let Some(phys) = crate::mem::paging::translate_user_writable_in(root, page) else {
             return false;
         };
         let off = a & (PAGE - 1);
