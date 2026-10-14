@@ -27,6 +27,10 @@ impl AddressSpace {
             for i in 0..HALF {
                 dst.add(i).write(0);
             }
+            // INVARIANT: the higher half is cloned by value at the PML4 level, so a
+            // NEW top-level kernel PML4 entry created after any AddressSpace exists
+            // would NOT propagate. All kernel higher-half regions must be mapped at
+            // boot, before any user space is forked.
             for i in HALF..512 {
                 dst.add(i).write(core::ptr::read_volatile(src.add(i)));
             }

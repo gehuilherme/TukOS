@@ -486,8 +486,6 @@ fn two_user_processes_preempt() -> Result<(), &'static str> {
     USER_B_RAN.store(0, Ordering::SeqCst);
     // Two user processes that never yield; only the timer makes both run.
     crate::process::spawn_demo_user_pair();
-    // hlt only wakes with interrupts on; earlier tests may leave IF clear.
-    arch_x86_64::interrupts::enable();
     for _ in 0..4000 {
         if USER_A_RAN.load(Ordering::SeqCst) > 0 && USER_B_RAN.load(Ordering::SeqCst) > 0 {
             return Ok(());

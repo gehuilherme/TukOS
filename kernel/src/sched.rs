@@ -158,6 +158,10 @@ fn switch_to_next() {
             // never on the stack of whichever thread last entered Ring 3.
             arch_x86_64::percpu::set_kernel_rsp(target_kstack_top);
         }
+        // A kernel thread (cr3 == 0) keeps whatever PML4 is loaded (possibly a
+        // previous user space): safe because the kernel higher half is identical
+        // in every address space. Likewise rsp0/kernel_rsp are left stale for
+        // kernel threads: they stay in Ring 0 and never `syscall`.
         let cur = crate::arch_cr3_base();
         if target_cr3 != 0 && target_cr3 != cur {
             arch_x86_64::cpu::write_cr3(target_cr3);

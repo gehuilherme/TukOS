@@ -5,7 +5,7 @@ use mm::paging::PageFlags;
 
 const USER_CODE_VA: u64 = 0x0000_0000_0040_0000;
 const USER_STACK_VA: u64 = 0x0000_0000_0050_0000;
-const USER_STACK_TOP: u64 = 0x0000_0000_0051_0000;
+const USER_STACK_TOP: u64 = USER_STACK_VA + 4096; // top of the single mapped page
 
 core::arch::global_asm!(
     r#"

@@ -13,6 +13,8 @@ core::arch::global_asm!(
 .global enter_user
 enter_user:
     // rdi = user entry RIP, rsi = user stack top.
+    // Save the caller's RFLAGS (incl. IF) above the callee-saved regs.
+    pushfq
     push rbp
     push rbx
     push r12
@@ -43,6 +45,7 @@ tukos_user_return:
     pop r12
     pop rbx
     pop rbp
+    popfq                 // restore the caller's RFLAGS (incl. IF)
     ret
 "#,
     off_ret = const OFF_KERNEL_RETURN_RSP,
