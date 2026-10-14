@@ -73,6 +73,12 @@ mod hw {
                 };
                 (*idt)[vector] = IdtEntry::new(stub, KERNEL_CS, ist, 0);
             }
+            (*idt)[255] = IdtEntry::new(
+                crate::trap::tukos_isr_255 as *const () as usize as u64,
+                KERNEL_CS,
+                0,
+                0,
+            );
             let ptr = DescriptorTablePointer {
                 limit: (256 * 16 - 1) as u16,
                 base: idt as u64,

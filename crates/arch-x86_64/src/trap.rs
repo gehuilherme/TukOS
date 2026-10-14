@@ -64,6 +64,13 @@ tukos_isr_\n:
     TUKOS_ISR_ERR \n
 .endr
 
+/* Dedicated stub for the LAPIC spurious vector (255). */
+.global tukos_isr_255
+tukos_isr_255:
+    push 0
+    push 255
+    jmp tukos_isr_common
+
 tukos_isr_common:
     push rax
     push rbx
@@ -116,6 +123,8 @@ tukos_isr_table:
 unsafe extern "C" {
     /// Entry stub addresses for vectors 0..48, defined in the assembly above.
     pub static tukos_isr_table: [u64; 48];
+    /// Entry stub for the spurious interrupt vector 255.
+    pub fn tukos_isr_255();
 }
 
 /// Called by `tukos_isr_common` with a pointer to the saved frame.
