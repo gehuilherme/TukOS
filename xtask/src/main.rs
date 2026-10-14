@@ -1,5 +1,6 @@
 use std::process::ExitCode;
 
+mod ktest;
 mod qemu;
 
 pub type Result<T> = std::result::Result<T, String>;
