@@ -19,6 +19,29 @@ fn table_mut(phys: u64) -> *mut u64 {
     phys_to_virt(phys) as *mut u64
 }
 
+/// Ensures every higher-half PML4 entry (256..512) of the active space exists,
+/// so later kernel mappings only touch lower-level tables (shared by pointer
+/// across all address spaces) rather than creating a new top-level entry that
+/// would not propagate to already-forked user spaces.
+pub fn reserve_kernel_higher_half() {
+    let pml4 = table_mut(crate::arch_cr3_base());
+    for i in 256..512 {
+        let slot = unsafe { pml4.add(i) };
+        let e = unsafe { core::ptr::read_volatile(slot) };
+        if !entry_present(e) {
+            let frame = alloc_frame().expect("sem frame p/ PDPT do kernel");
+            unsafe {
+                core::ptr::write_bytes(table_mut(frame) as *mut u8, 0, 4096);
+                // Present + writable, NOT user: kernel-only higher half.
+                core::ptr::write_volatile(
+                    slot,
+                    make_entry(frame, PageFlags::PRESENT.union(PageFlags::WRITABLE)),
+                );
+            }
+        }
+    }
+}
+
 /// Returns the physical address of the next-level table for `index`, creating it
 /// if absent (when `create`). Fails on a huge-page entry.
 unsafe fn next_table(table: *mut u64, index: usize, create: bool) -> Result<Option<u64>, MapError> {

@@ -15,5 +15,6 @@ pub fn init() {
         .get_response()
         .expect("Limine nao forneceu o mapa de memoria");
     frames::init(hhdm, map.entries());
+    paging::reserve_kernel_higher_half();
     heap::init();
 }

@@ -44,6 +44,10 @@ const TESTS: &[(&str, TestFn)] = &[
         kernel_mapped_in_new_address_space,
     ),
     (
+        "higher_half_pml4_fully_reserved",
+        higher_half_pml4_fully_reserved,
+    ),
+    (
         "address_space_drop_frees_user_frames",
         address_space_drop_frees_user_frames,
     ),
@@ -511,4 +515,19 @@ fn two_user_processes_preempt() -> Result<(), &'static str> {
         arch_x86_64::cpu::hlt();
     }
     Err("o timer nao preemptou os dois processos de usuario")
+}
+
+fn higher_half_pml4_fully_reserved() -> Result<(), &'static str> {
+    use mm::paging::entry_present;
+    // Every PML4 entry 256..512 of the active space must be present after init,
+    // so a new address space clones a complete kernel higher half.
+    let pml4 = crate::arch_cr3_base();
+    let table = crate::mem::frames::phys_to_virt(pml4) as *const u64;
+    for i in 256..512 {
+        let e = unsafe { core::ptr::read_volatile(table.add(i)) };
+        if !entry_present(e) {
+            return Err("entrada PML4 da metade alta nao reservada");
+        }
+    }
+    Ok(())
 }
