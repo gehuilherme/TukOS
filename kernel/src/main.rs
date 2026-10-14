@@ -3,6 +3,7 @@
 
 #[macro_use]
 mod console;
+mod fbcon;
 #[cfg(feature = "ktest")]
 mod ktest;
 mod panic;
@@ -11,11 +12,15 @@ mod serial;
 mod trap;
 
 use limine::BaseRevision;
-use limine::request::{RequestsEndMarker, RequestsStartMarker};
+use limine::request::{FramebufferRequest, RequestsEndMarker, RequestsStartMarker};
 
 #[used]
 #[unsafe(link_section = ".requests")]
 pub static BASE_REVISION: BaseRevision = BaseRevision::new();
+
+#[used]
+#[unsafe(link_section = ".requests")]
+pub static FRAMEBUFFER_REQUEST: FramebufferRequest = FramebufferRequest::new();
 
 #[used]
 #[unsafe(link_section = ".requests_start_marker")]
@@ -28,6 +33,7 @@ static _END_MARKER: RequestsEndMarker = RequestsEndMarker::new();
 #[unsafe(no_mangle)]
 unsafe extern "C" fn kmain() -> ! {
     serial::init();
+    fbcon::init_from_limine();
     kprintln!("TukOS {} iniciando", env!("CARGO_PKG_VERSION"));
     assert!(BASE_REVISION.is_supported(), "revisao base do Limine nao suportada");
 

@@ -4,6 +4,7 @@ use core::fmt::{self, Write};
 
 pub fn _print(args: fmt::Arguments) {
     let _ = crate::serial::SERIAL.lock().write_fmt(args);
+    crate::fbcon::write_fmt(args);
 }
 
 #[macro_export]

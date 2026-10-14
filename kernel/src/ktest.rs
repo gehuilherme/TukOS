@@ -8,6 +8,7 @@ const TESTS: &[(&str, TestFn)] = &[
     ("tss_loaded", tss_loaded),
     ("idt_loaded", idt_loaded),
     ("breakpoint_returns", breakpoint_returns),
+    ("fbcon_draws_glyph", fbcon_draws_glyph),
 ];
 
 fn gdt_selectors_loaded() -> Result<(), &'static str> {
@@ -65,4 +66,22 @@ pub fn run_all() -> ! {
     }
     kprintln!("@@TUKOS-KTEST-DONE passed={passed} failed={failed}");
     crate::qemu::exit(if failed == 0 { crate::qemu::ExitCode::Success } else { crate::qemu::ExitCode::Failure })
+}
+
+fn fbcon_draws_glyph() -> Result<(), &'static str> {
+    let mut guard = crate::fbcon::FBCON.lock();
+    let con = guard.as_mut().ok_or("sem framebuffer")?;
+    let (w, h) = (crate::fbcon::FbCon::cell_width(), crate::fbcon::FbCon::cell_height());
+    let cell_lit = |con: &crate::fbcon::FbCon| (0..h).any(|y| (0..w).any(|x| con.pixel(x, y) != 0));
+
+    con.clear();
+    if cell_lit(con) {
+        return Err("celula deveria estar apagada apos clear");
+    }
+    con.write_str("#");
+    if !cell_lit(con) {
+        return Err("glifo nao foi desenhado");
+    }
+    con.clear();
+    Ok(())
 }
