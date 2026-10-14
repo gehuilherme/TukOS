@@ -25,7 +25,7 @@ pub fn copy_from_user(va: u64, len: u64) -> Option<Vec<u8>> {
     let mut a = va;
     while a < end {
         let page = a & !(PAGE - 1);
-        let phys = crate::mem::paging::translate_in(root, page)?;
+        let phys = crate::mem::paging::translate_user_in(root, page)?;
         let off = a & (PAGE - 1);
         let n = core::cmp::min(PAGE - off, end - a);
         let src = (crate::mem::frames::phys_to_virt(phys) + off) as *const u8;

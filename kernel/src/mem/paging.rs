@@ -137,6 +137,68 @@ pub fn translate_in(root: u64, virt: u64) -> Option<u64> {
     }
 }
 
+/// Like [`translate_in`] but for user-copy validation: every level (and the
+/// leaf) must carry the USER bit, and a HUGE entry at an intermediate level is
+/// rejected (large user pages are unsupported).
+pub fn translate_user_in(root: u64, virt: u64) -> Option<u64> {
+    let idx = page_table_indices(virt);
+    let mut table = table_mut(root);
+    for &i in &idx[..3] {
+        let entry = unsafe { core::ptr::read_volatile(table.add(i)) };
+        if !entry_present(entry) {
+            return None;
+        }
+        let f = entry_flags(entry);
+        if f.contains(PageFlags::HUGE) || !f.contains(PageFlags::USER) {
+            return None;
+        }
+        table = table_mut(entry_frame(entry));
+    }
+    let entry = unsafe { core::ptr::read_volatile(table.add(idx[3])) };
+    if entry_present(entry) && entry_flags(entry).contains(PageFlags::USER) {
+        Some(entry_frame(entry) + mm::paging::page_offset(virt))
+    } else {
+        None
+    }
+}
+
+/// ktest helper: marks the PD entry covering a mapped USER page as HUGE and
+/// checks `translate_user_in` refuses it, then restores the entry.
+#[cfg(feature = "ktest")]
+pub fn test_huge_rejected() -> Result<(), &'static str> {
+    use crate::mem::space::AddressSpace;
+    const VA: u64 = 0x30_0000;
+    let space = AddressSpace::new_user();
+    let frame = alloc_frame().ok_or("sem frame")?;
+    unsafe {
+        space
+            .map(VA, frame, PageFlags::USER.union(PageFlags::WRITABLE))
+            .map_err(|_| "map")?;
+    }
+    if translate_user_in(space.root(), VA).is_none() {
+        return Err("pagina USER normal deveria ser aceita");
+    }
+    // Walk PML4 -> PDPT -> PD and locate the PD entry (level 2) for VA.
+    let idx = page_table_indices(VA);
+    let mut table = table_mut(space.root());
+    for &i in &idx[..2] {
+        let e = unsafe { core::ptr::read_volatile(table.add(i)) };
+        table = table_mut(entry_frame(e));
+    }
+    let slot = unsafe { table.add(idx[2]) };
+    let orig = unsafe { core::ptr::read_volatile(slot) };
+    unsafe { core::ptr::write_volatile(slot, orig | (1 << 7)) };
+    let rejected = translate_user_in(space.root(), VA).is_none();
+    unsafe { core::ptr::write_volatile(slot, orig) };
+    if !rejected {
+        return Err("entrada HUGE foi aceita");
+    }
+    if translate_user_in(space.root(), VA).is_none() {
+        return Err("restauracao falhou");
+    }
+    Ok(())
+}
+
 /// # Safety
 /// Modifies the active page tables; see [`map_page_in`].
 pub unsafe fn map_page(virt: u64, phys: u64, flags: PageFlags) -> Result<(), MapError> {

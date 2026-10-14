@@ -73,7 +73,58 @@ const TESTS: &[(&str, TestFn)] = &[
     ("reloc_dir64_crosses_page", reloc_dir64_crosses_page),
     ("stack_placed_above_image", stack_placed_above_image),
     ("user_reads_own_teb", user_reads_own_teb),
+    (
+        "translate_user_requires_user_bit",
+        translate_user_requires_user_bit,
+    ),
+    ("translate_user_rejects_huge", translate_user_rejects_huge),
+    (
+        "load_pe_rejects_malformed_without_panic",
+        load_pe_rejects_malformed_without_panic,
+    ),
 ];
+
+fn translate_user_requires_user_bit() -> Result<(), &'static str> {
+    use crate::mem::space::AddressSpace;
+    use mm::paging::PageFlags;
+    let space = AddressSpace::new_user();
+    let user_frame = crate::mem::frames::alloc_frame().ok_or("sem frame")?;
+    let kern_frame = crate::mem::frames::alloc_frame().ok_or("sem frame")?;
+    unsafe {
+        space
+            .map(
+                0x10_0000,
+                user_frame,
+                PageFlags::USER.union(PageFlags::WRITABLE),
+            )
+            .map_err(|_| "map user")?;
+        // A lower-half page WITHOUT the USER bit (kernel-only): must be refused.
+        space
+            .map(0x20_0000, kern_frame, PageFlags::WRITABLE)
+            .map_err(|_| "map kern")?;
+    }
+    if crate::mem::paging::translate_user_in(space.root(), 0x10_0000).is_none() {
+        return Err("pagina USER deveria ser aceita");
+    }
+    if crate::mem::paging::translate_user_in(space.root(), 0x20_0000).is_some() {
+        return Err("pagina sem USER foi aceita (vazamento de kernel)");
+    }
+    Ok(())
+}
+
+fn translate_user_rejects_huge() -> Result<(), &'static str> {
+    crate::mem::paging::test_huge_rejected()
+}
+
+fn load_pe_rejects_malformed_without_panic() -> Result<(), &'static str> {
+    use crate::mem::space::AddressSpace;
+    let space = AddressSpace::new_user();
+    // Truncated / bad image: must return Err, not panic.
+    if crate::loader::load_pe(&space, &[0u8; 8], 0x40_0000).is_ok() {
+        return Err("load_pe aceitou imagem malformada");
+    }
+    Ok(())
+}
 
 fn user_reads_own_teb() -> Result<(), &'static str> {
     use core::sync::atomic::Ordering;

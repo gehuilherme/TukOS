@@ -12,6 +12,7 @@ pub enum LoadError {
     Map,
     Alloc,
     UnsupportedReloc,
+    Overflow,
 }
 
 const PAGE: u64 = 4096;
@@ -22,7 +23,9 @@ const PAGE: u64 = 4096;
 fn rmw_u64(space: &AddressSpace, va: u64, f: impl FnOnce(u64) -> u64) -> bool {
     let mut bytes = [0u8; 8];
     for i in 0..8u64 {
-        let a = va + i;
+        let Some(a) = va.checked_add(i) else {
+            return false;
+        };
         let Some(phys) = space.translate(a & !(PAGE - 1)) else {
             return false;
         };
@@ -31,7 +34,9 @@ fn rmw_u64(space: &AddressSpace, va: u64, f: impl FnOnce(u64) -> u64) -> bool {
     }
     let v = f(u64::from_le_bytes(bytes)).to_le_bytes();
     for i in 0..8u64 {
-        let a = va + i;
+        let Some(a) = va.checked_add(i) else {
+            return false;
+        };
         let Some(phys) = space.translate(a & !(PAGE - 1)) else {
             return false;
         };
@@ -46,12 +51,15 @@ pub fn image_top(image: &[u8], load_base: u64) -> Result<u64, LoadError> {
     let pe = PeFile::parse(image).map_err(LoadError::Parse)?;
     let mut end = 0u64;
     for sec in pe.sections() {
-        let sec_end = sec.rva as u64 + sec.virtual_size as u64;
+        let sec_end = (sec.rva as u64)
+            .checked_add(sec.virtual_size as u64)
+            .ok_or(LoadError::Overflow)?;
         if sec_end > end {
             end = sec_end;
         }
     }
-    Ok(load_base + ((end + PAGE - 1) & !(PAGE - 1)))
+    let aligned = end.checked_add(PAGE - 1).ok_or(LoadError::Overflow)? & !(PAGE - 1);
+    load_base.checked_add(aligned).ok_or(LoadError::Overflow)
 }
 
 /// Maps every section of `image` into `space` at `load_base + rva`, zero-filling
@@ -71,7 +79,14 @@ pub fn load_pe(space: &AddressSpace, image: &[u8], load_base: u64) -> Result<u64
             flags = flags.union(PageFlags::NO_EXECUTE);
         }
         let pages = (sec.virtual_size as u64).div_ceil(PAGE).max(1);
+        let sec_base = load_base
+            .checked_add(sec.rva as u64)
+            .ok_or(LoadError::Overflow)?;
         for p in 0..pages {
+            let va = p
+                .checked_mul(PAGE)
+                .and_then(|o| sec_base.checked_add(o))
+                .ok_or(LoadError::Overflow)?;
             let frame = alloc_frame().ok_or(LoadError::Alloc)?;
             let dst = phys_to_virt(frame) as *mut u8;
             // Zero the whole page first (covers .bss slack), then copy raw bytes
@@ -88,9 +103,7 @@ pub fn load_pe(space: &AddressSpace, image: &[u8], load_base: u64) -> Result<u64
                     );
                     core::ptr::copy_nonoverlapping(sec.raw.as_ptr().add(off), dst, n);
                 }
-                space
-                    .map(load_base + sec.rva as u64 + p * PAGE, frame, flags)
-                    .map_err(|_| LoadError::Map)?;
+                space.map(va, frame, flags).map_err(|_| LoadError::Map)?;
             }
         }
     }
@@ -100,7 +113,10 @@ pub fn load_pe(space: &AddressSpace, image: &[u8], load_base: u64) -> Result<u64
             match r.kind {
                 REL_BASED_ABSOLUTE => {}
                 REL_BASED_DIR64 => {
-                    if !rmw_u64(space, load_base + r.rva as u64, |v| v.wrapping_add(delta)) {
+                    let va = load_base
+                        .checked_add(r.rva as u64)
+                        .ok_or(LoadError::Overflow)?;
+                    if !rmw_u64(space, va, |v| v.wrapping_add(delta)) {
                         return Err(LoadError::Map);
                     }
                 }
@@ -109,5 +125,7 @@ pub fn load_pe(space: &AddressSpace, image: &[u8], load_base: u64) -> Result<u64
         }
     }
 
-    Ok(load_base + pe.entry_point_rva() as u64)
+    load_base
+        .checked_add(pe.entry_point_rva() as u64)
+        .ok_or(LoadError::Overflow)
 }
