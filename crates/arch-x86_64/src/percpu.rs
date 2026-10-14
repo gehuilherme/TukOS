@@ -39,9 +39,10 @@ mod hw {
     const IA32_KERNEL_GS_BASE: u32 = 0xC000_0102;
 
     /// # Safety
-    /// `block` must outlive all CPU use (a `'static`); call once on the boot CPU.
-    pub unsafe fn install(block: &'static PerCpu) {
-        let addr = block as *const PerCpu as u64;
+    /// `block` must point to a writable `'static` block that outlives all CPU use;
+    /// call once on the boot CPU.
+    pub unsafe fn install(block: *const PerCpu) {
+        let addr = block as u64;
         unsafe {
             write_msr(IA32_GS_BASE, addr);
             write_msr(IA32_KERNEL_GS_BASE, addr);
