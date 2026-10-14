@@ -21,6 +21,8 @@ fn main() -> ExitCode {
             "xtask",
             "-p",
             "arch-x86_64",
+            "-p",
+            "mm",
         ])),
         _ => {
             eprintln!("{USAGE}");
