@@ -447,6 +447,11 @@ impl<'a> PeFile<'a> {
         })
     }
 
+    /// RVA of the named export `name`, or `None` if absent or the table is invalid.
+    pub fn export_rva_by_name(&self, name: &str) -> Option<u32> {
+        self.exports().ok()?.find(|e| e.name == name).map(|e| e.rva)
+    }
+
     /// Iterates the named exports (data directory 0) as `(name, rva)`. The whole
     /// table is validated before the iterator is returned. Forwarder exports are
     /// not resolved: their `rva` is returned as stored.
@@ -831,6 +836,14 @@ mod tests {
         let f = PeFile::parse(&pe).unwrap();
         let exps: Vec<_> = f.exports().unwrap().collect();
         assert!(exps.iter().any(|e| e.name == "Bar" && e.rva == 0x1234));
+    }
+
+    #[test]
+    fn export_rva_by_name_finds_and_misses() {
+        let pe = build_pe_with_exports();
+        let f = PeFile::parse(&pe).unwrap();
+        assert_eq!(f.export_rva_by_name("Bar"), Some(0x1234));
+        assert_eq!(f.export_rva_by_name("Nope"), None);
     }
 
     #[test]

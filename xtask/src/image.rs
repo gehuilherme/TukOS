@@ -20,6 +20,12 @@ serial: yes
 
 pub fn build(features: &[&str]) -> crate::Result<PathBuf> {
     let root = workspace_root();
+    // The kernel's build.rs embeds target/x86_64-pc-windows-msvc/release/ntdll.dll
+    // when present, so build it first. Without MSVC (e.g. Linux) this fails and
+    // the kernel simply embeds an empty image.
+    if let Err(e) = crate::ntdll::build() {
+        eprintln!("aviso: ntdll nao compilado ({e}); kernel embute ntdll vazio");
+    }
     let kernel = build_kernel(&root, features)?;
     let bootx64 = ensure_limine(&root)?;
     let variant = if features.is_empty() {

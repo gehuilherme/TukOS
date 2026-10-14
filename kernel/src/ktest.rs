@@ -84,6 +84,7 @@ const TESTS: &[(&str, TestFn)] = &[
         copy_to_user_rejects_readonly_page,
     ),
     ("translate_user_rejects_huge", translate_user_rejects_huge),
+    ("ntdll_embedded_parses", ntdll_embedded_parses),
     (
         "load_pe_rejects_malformed_without_panic",
         load_pe_rejects_malformed_without_panic,
@@ -101,6 +102,18 @@ const TESTS: &[(&str, TestFn)] = &[
         handle_table_bounds_and_close,
     ),
 ];
+
+fn ntdll_embedded_parses() -> Result<(), &'static str> {
+    let bytes = crate::ntdll_image::NTDLL_BYTES;
+    if bytes.is_empty() {
+        return Ok(()); // ntdll not embedded on this host (no MSVC): skip.
+    }
+    let pe = pe::PeFile::parse(bytes).map_err(|_| "ntdll.dll embutido nao e PE valido")?;
+    if pe.export_rva_by_name("NtWriteFile").is_none() {
+        return Err("ntdll embutido nao exporta NtWriteFile");
+    }
+    Ok(())
+}
 
 fn handle_table_bounds_and_close() -> Result<(), &'static str> {
     use crate::object::{HandleTable, Object};

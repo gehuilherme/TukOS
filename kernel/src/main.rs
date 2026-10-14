@@ -9,6 +9,7 @@ mod fbcon;
 mod ktest;
 mod loader;
 mod mem;
+mod ntdll_image;
 mod object;
 mod panic;
 mod process;
