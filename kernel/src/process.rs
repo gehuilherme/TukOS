@@ -547,21 +547,35 @@ pub fn build_exe_importing_ntdll() -> alloc::vec::Vec<u8> {
 
 const NTDLL_LOAD_BASE: u64 = 0x1000_0000;
 
-/// Loads the test `.exe` plus the embedded ntdll into one address space,
-/// resolves the exe's imports and starts a user thread at the exe entry.
-/// Does nothing when the ntdll is not embedded.
-pub fn spawn_exe_with_ntdll() {
+/// A process space holding the test `.exe` + ntdll, with stack/TEB/PEB and
+/// `PEB->Ldr` built. The thread is not started yet.
+pub struct ExeSpace {
+    pub space: AddressSpace,
+    pub exe: alloc::vec::Vec<u8>,
+    pub exe_entry: u64,
+    pub stack_va: u64,
+    pub teb_va: u64,
+    pub peb_va: u64,
+}
+
+pub const EXE_BASE: u64 = PE_IMAGE_BASE;
+pub const NTDLL_BASE: u64 = NTDLL_LOAD_BASE;
+
+/// Loads exe (0x40_0000) and ntdll (0x1000_0000), maps stack/TEB/PEB and the
+/// loader-data page, and fills `PEB->Ldr` (exe first, then ntdll). Layout above
+/// the ntdll image: guard, stack, guard, TEB, PEB, ldr page.
+/// Requires the ntdll to be embedded.
+pub fn build_exe_ntdll_space() -> ExeSpace {
     let nt = crate::ntdll_image::NTDLL_BYTES;
-    if nt.is_empty() {
-        return;
-    }
     let exe = build_exe_importing_ntdll();
     let space = AddressSpace::new_user();
-    let entry = crate::loader::load_pe(&space, &exe, PE_IMAGE_BASE).expect("load exe");
-    crate::loader::load_pe(&space, nt, NTDLL_LOAD_BASE).expect("load ntdll");
-    crate::loader::resolve_imports(&space, &exe, PE_IMAGE_BASE, nt, NTDLL_LOAD_BASE)
-        .expect("resolve imports");
-    let stack_va = crate::loader::image_top(nt, NTDLL_LOAD_BASE).expect("image_top") + 4096;
+    let exe_entry = crate::loader::load_pe(&space, &exe, PE_IMAGE_BASE).expect("load exe");
+    let ntdll_entry = crate::loader::load_pe(&space, nt, NTDLL_LOAD_BASE).expect("load ntdll");
+    let exe_top = crate::loader::image_top(&exe, PE_IMAGE_BASE).expect("image_top");
+    let nt_top = crate::loader::image_top(nt, NTDLL_LOAD_BASE).expect("image_top");
+    let exe_size = (exe_top - PE_IMAGE_BASE) as u32;
+    let nt_size = (nt_top - NTDLL_LOAD_BASE) as u32;
+    let stack_va = nt_top + 4096;
     let stack_phys = crate::mem::frames::alloc_frame().expect("sem frame p/ pilha");
     unsafe {
         space
@@ -576,6 +590,7 @@ pub fn spawn_exe_with_ntdll() {
     }
     let teb_va = stack_va + 2 * 4096;
     let peb_va = stack_va + 3 * 4096;
+    let ldr_va = stack_va + 4 * 4096;
     crate::teb::setup(
         &space,
         teb_va,
@@ -585,6 +600,58 @@ pub fn spawn_exe_with_ntdll() {
         stack_va,
     )
     .expect("teb setup");
+    crate::teb::setup_ldr(
+        &space,
+        ldr_va,
+        peb_va,
+        &[
+            crate::teb::LdrModule {
+                base: PE_IMAGE_BASE,
+                entry: exe_entry,
+                size: exe_size,
+                name: "program.exe",
+            },
+            crate::teb::LdrModule {
+                base: NTDLL_LOAD_BASE,
+                entry: ntdll_entry,
+                size: nt_size,
+                name: "ntdll.dll",
+            },
+        ],
+    )
+    .expect("ldr setup");
+    ExeSpace {
+        space,
+        exe,
+        exe_entry,
+        stack_va,
+        teb_va,
+        peb_va,
+    }
+}
+
+/// Loads the test `.exe` plus the embedded ntdll and starts a user thread.
+/// The thread starts at ntdll's `LdrInitializeThunk`, which walks `PEB->Ldr`.
+/// Does nothing when the ntdll is not embedded.
+pub fn spawn_exe_with_ntdll() {
+    let nt = crate::ntdll_image::NTDLL_BYTES;
+    if nt.is_empty() {
+        return;
+    }
+    let es = build_exe_ntdll_space();
+    let thunk = pe::PeFile::parse(nt)
+        .ok()
+        .and_then(|p| p.export_rva_by_name("LdrInitializeThunk"));
+    let start = match thunk {
+        Some(rva) => NTDLL_LOAD_BASE + u64::from(rva),
+        None => {
+            // FALLBACK (until Task 3 adds LdrInitializeThunk to the ntdll): the
+            // kernel resolves the exe's imports itself and starts at the exe entry.
+            crate::loader::resolve_imports(&es.space, &es.exe, PE_IMAGE_BASE, nt, NTDLL_LOAD_BASE)
+                .expect("resolve imports");
+            es.exe_entry
+        }
+    };
     let kstack = alloc::vec![0u8; KSTACK_SIZE].into_boxed_slice();
-    crate::sched::spawn_user(space, entry, stack_va + 4096, kstack, teb_va);
+    crate::sched::spawn_user(es.space, start, es.stack_va + 4096, kstack, es.teb_va);
 }

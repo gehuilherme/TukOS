@@ -72,6 +72,7 @@ const TESTS: &[(&str, TestFn)] = &[
     ("ntwritefile_fills_iosb", ntwritefile_fills_iosb),
     ("ntwritefile_bad_handle", ntwritefile_bad_handle),
     ("exe_imports_ntdll_and_runs", exe_imports_ntdll_and_runs),
+    ("peb_ldr_list_well_formed", peb_ldr_list_well_formed),
     ("two_user_processes_preempt", two_user_processes_preempt),
     ("reloc_dir64_crosses_page", reloc_dir64_crosses_page),
     ("stack_placed_above_image", stack_placed_above_image),
@@ -920,6 +921,69 @@ fn exe_imports_ntdll_and_runs() -> Result<(), &'static str> {
         }
     }
     Err("o .exe que importa ntdll nao rodou/saiu")
+}
+
+fn peb_ldr_list_well_formed() -> Result<(), &'static str> {
+    if crate::ntdll_image::NTDLL_BYTES.is_empty() {
+        return Ok(());
+    }
+    let es = crate::process::build_exe_ntdll_space();
+    let rd = |va: u64, n: usize| -> Option<alloc::vec::Vec<u8>> {
+        let mut v = alloc::vec::Vec::new();
+        for i in 0..n as u64 {
+            let a = va + i;
+            let phys = es.space.translate(a & !4095)?;
+            v.push(unsafe {
+                *((crate::mem::frames::phys_to_virt(phys) + (a & 4095)) as *const u8)
+            });
+        }
+        Some(v)
+    };
+    let r64 = |va: u64| -> Option<u64> { Some(u64::from_le_bytes(rd(va, 8)?.try_into().ok()?)) };
+    let ldr = r64(es.peb_va + 0x18).ok_or("PEB ilegivel")?;
+    if ldr == 0 {
+        return Err("PEB.Ldr == 0");
+    }
+    let head = ldr + 0x10;
+    let mut cur = r64(head).ok_or("head ilegivel")?;
+    let mut mods = alloc::vec::Vec::new();
+    while cur != head {
+        if mods.len() >= 8 {
+            return Err("lista nao circular");
+        }
+        mods.push(cur);
+        cur = r64(cur).ok_or("flink ilegivel")?;
+    }
+    if mods.len() != 2 {
+        return Err("lista deveria ter dois modulos");
+    }
+    if r64(head + 8) != Some(mods[1]) || r64(mods[0] + 8) != Some(head) {
+        return Err("Blink inconsistente");
+    }
+    if r64(mods[0] + 0x30) != Some(crate::process::EXE_BASE)
+        || r64(mods[0] + 0x38) != Some(es.exe_entry)
+    {
+        return Err("entrada 0 nao e o .exe");
+    }
+    let want: alloc::vec::Vec<u16> = "ntdll.dll".encode_utf16().collect();
+    let mut found = false;
+    for &m in &mods {
+        let len = rd(m + 0x58, 2).ok_or("len")?;
+        let len = u16::from_le_bytes([len[0], len[1]]) as usize;
+        let buf = r64(m + 0x58 + 8).ok_or("buf")?;
+        let raw = rd(buf, len).ok_or("nome ilegivel")?;
+        let name: alloc::vec::Vec<u16> = raw
+            .chunks(2)
+            .map(|c| u16::from_le_bytes([c[0], c[1]]))
+            .collect();
+        if name == want && r64(m + 0x30) == Some(crate::process::NTDLL_BASE) {
+            found = true;
+        }
+    }
+    if !found {
+        return Err("ntdll.dll nao encontrado na lista");
+    }
+    Ok(())
 }
 
 fn two_user_processes_preempt() -> Result<(), &'static str> {
