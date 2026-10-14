@@ -115,6 +115,26 @@ pub fn run_all() -> crate::Result<()> {
     run_variant("ktest-fault", |o, r| {
         check_expected_panic(o, r, &["PAGE_FAULT", "cr2=0x7fff00000000"])
     })?;
+    {
+        let esp = crate::image::build(&["ktest-backtrace"])?;
+        let (outcome, serial) = crate::qemu::run_captured(&esp, TIMEOUT)?;
+        let report = parse(&serial);
+        check_expected_panic(outcome, &report, &["backtrace deliberado"]).map_err(|e| {
+            format!(
+                "variante ktest-backtrace: {e}
+--- serial ---
+{serial}"
+            )
+        })?;
+        if !serial.contains("@@TUKOS-BACKTRACE") {
+            return Err(format!(
+                "variante ktest-backtrace: backtrace ausente na serial
+--- serial ---
+{serial}"
+            ));
+        }
+        println!("ktest: variante ktest-backtrace ok");
+    }
     println!("ktest: todas as variantes passaram");
     Ok(())
 }

@@ -101,7 +101,12 @@ mod tests {
     #[test]
     fn entry_frame_masks_flags_and_nx() {
         // Present+writable+NX on frame 0x2000: extracting the frame drops all of them.
-        let e = make_entry(0x2000, PageFlags::PRESENT.union(PageFlags::WRITABLE).union(PageFlags::NO_EXECUTE));
+        let e = make_entry(
+            0x2000,
+            PageFlags::PRESENT
+                .union(PageFlags::WRITABLE)
+                .union(PageFlags::NO_EXECUTE),
+        );
         assert_eq!(entry_frame(e), 0x2000);
     }
 

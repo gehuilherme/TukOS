@@ -63,10 +63,7 @@ unsafe extern "C" fn kmain() -> ! {
     );
 
     mem::init();
-    kprintln!(
-        "memoria: {} frames livres",
-        mem::frames::free_frame_count()
-    );
+    kprintln!("memoria: {} frames livres", mem::frames::free_frame_count());
 
     kprintln!("TukOS pronto");
 
@@ -83,6 +80,19 @@ unsafe extern "C" fn kmain() -> ! {
     #[cfg(feature = "ktest-fault")]
     unsafe {
         core::ptr::read_volatile(0x0000_7fff_0000_0000 as *const u64);
+    }
+
+    #[cfg(feature = "ktest-backtrace")]
+    {
+        fn deep(n: u32) {
+            if n == 0 {
+                panic!("backtrace deliberado");
+            }
+            deep(n - 1);
+            // Prevent tail-call optimization from flattening the frames.
+            core::hint::black_box(n);
+        }
+        deep(3);
     }
 
     #[allow(unreachable_code)]

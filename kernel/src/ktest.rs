@@ -37,13 +37,14 @@ fn heap_box_and_vec() -> Result<(), &'static str> {
     Ok(())
 }
 
-
 fn map_translate_unmap() -> Result<(), &'static str> {
     use mm::paging::PageFlags;
     let phys = crate::mem::frames::alloc_frame().ok_or("sem frame")?;
     // A free slot in the non-canonical-safe test window well above the kernel heap.
     let virt = 0xffff_f000_0000_0000u64;
-    let flags = PageFlags::PRESENT.union(PageFlags::WRITABLE).union(PageFlags::NO_EXECUTE);
+    let flags = PageFlags::PRESENT
+        .union(PageFlags::WRITABLE)
+        .union(PageFlags::NO_EXECUTE);
     unsafe { crate::mem::paging::map_page(virt, phys, flags).map_err(|_| "map falhou")? };
     if crate::mem::paging::translate(virt) != Some(phys) {
         return Err("translate nao devolveu o frame mapeado");

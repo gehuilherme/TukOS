@@ -3,7 +3,9 @@
 //! the global frame allocator when missing.
 
 use crate::mem::frames::{alloc_frame, phys_to_virt};
-use mm::paging::{PageFlags, entry_flags, entry_frame, entry_present, make_entry, page_table_indices};
+use mm::paging::{
+    PageFlags, entry_flags, entry_frame, entry_present, make_entry, page_table_indices,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MapError {
@@ -34,7 +36,9 @@ unsafe fn next_table(table: *mut u64, index: usize, create: bool) -> Result<Opti
     let frame = alloc_frame().ok_or(MapError::AllocFailed)?;
     // Zero the new table through the HHDM.
     unsafe { core::ptr::write_bytes(table_mut(frame) as *mut u8, 0, 4096) };
-    let flags = PageFlags::PRESENT.union(PageFlags::WRITABLE).union(PageFlags::USER);
+    let flags = PageFlags::PRESENT
+        .union(PageFlags::WRITABLE)
+        .union(PageFlags::USER);
     unsafe { core::ptr::write_volatile(slot, make_entry(frame, flags)) };
     Ok(Some(frame))
 }

@@ -67,8 +67,7 @@ pub fn init(hhdm: u64, map: &[&Entry]) {
 
     let bitmap_phys = host.base;
     let bitmap_ptr = (bitmap_phys + hhdm) as *mut u64;
-    let bitmap: &'static mut [u64] =
-        unsafe { core::slice::from_raw_parts_mut(bitmap_ptr, words) };
+    let bitmap: &'static mut [u64] = unsafe { core::slice::from_raw_parts_mut(bitmap_ptr, words) };
 
     let mut allocator = BitmapAllocator::new(bitmap, total_frames);
     for e in map.iter().filter(|e| e.entry_type == EntryType::USABLE) {
