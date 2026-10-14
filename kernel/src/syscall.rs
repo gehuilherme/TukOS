@@ -127,16 +127,18 @@ pub extern "C" fn dispatch(nr: u64, a0: u64, a1: u64, a2: u64, _a3: u64, _user_r
         },
         NT_TERMINATE_PROCESS => {
             #[cfg(feature = "ktest")]
-            LAST_TERMINATE_STATUS.store(a0, Ordering::SeqCst);
+            LAST_TERMINATE_STATUS.store(a1 as u32 as u64, Ordering::SeqCst);
             if crate::sched::current_is_user() {
                 crate::sched::exit_current();
             }
             #[cfg(target_os = "none")]
             unsafe {
-                arch_x86_64::usermode::exit_to_kernel(a0)
+                arch_x86_64::usermode::exit_to_kernel(a1 as u32 as u64)
             }
             #[cfg(not(target_os = "none"))]
-            a0
+            {
+                a1 as u32 as u64
+            }
         }
         #[cfg(feature = "ktest")]
         SYS_SUM6 => match (stack_arg(_user_rsp, 0), stack_arg(_user_rsp, 1)) {

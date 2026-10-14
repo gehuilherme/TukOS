@@ -857,24 +857,40 @@ pub fn build_exe_importing_kernel32() -> alloc::vec::Vec<u8> {
     )
 }
 
-/// Test `.exe` that calls `kernel32!RtlExitUserProcess(0x5A5A)`, which kernel32
-/// exports as a forwarder to `ntdll.NtTerminateProcess` (so the status 0x5A5A reaches
-/// the kernel only if the loader chased the forward).
+/// Test `.exe` that calls `kernel32!TukosCloseForward(0x1234)`, which kernel32
+/// exports as a forwarder to `ntdll.NtClose` (1 arg -> 1 arg). The bogus handle makes
+/// NtClose return STATUS_INVALID_HANDLE in rax; the exe then calls
+/// `ExitProcess(eax)`, so that status reaches the kernel only if the loader chased
+/// the forward to ntdll's real stub.
 pub fn build_exe_calling_forwarder() -> alloc::vec::Vec<u8> {
     build_import_exe(
         "kernel32.dll",
-        &["RtlExitUserProcess"],
+        &["TukosCloseForward", "ExitProcess"],
         None,
         None,
         |slot, _| {
             let mut c = alloc::vec::Vec::new();
             c.extend_from_slice(&[0x48, 0x83, 0xEC, 0x28]); // sub rsp, 0x28
-            c.extend_from_slice(&[0xB9, 0x5A, 0x5A, 0, 0]); // mov ecx, 0x5A5A
-            rip_rel_to(&mut c, &[0xFF, 0x15], slot[0]); // call [RtlExitUserProcess]
+            c.extend_from_slice(&[0xB9, 0x34, 0x12, 0, 0]); // mov ecx, 0x1234
+            rip_rel_to(&mut c, &[0xFF, 0x15], slot[0]); // call [TukosCloseForward]
+            c.extend_from_slice(&[0x89, 0xC1]); // mov ecx, eax
+            rip_rel_to(&mut c, &[0xFF, 0x15], slot[1]); // call [ExitProcess]
             c.extend_from_slice(&[0x0F, 0x0B]);
             c
         },
     )
+}
+
+/// Test `.exe` that calls `kernel32!ExitProcess(0x2A)`.
+pub fn build_exe_exit_code_2a() -> alloc::vec::Vec<u8> {
+    build_import_exe("kernel32.dll", &["ExitProcess"], None, None, |slot, _| {
+        let mut c = alloc::vec::Vec::new();
+        c.extend_from_slice(&[0x48, 0x83, 0xEC, 0x28]); // sub rsp, 0x28
+        c.extend_from_slice(&[0xB9, 0x2A, 0, 0, 0]); // mov ecx, 0x2A
+        rip_rel_to(&mut c, &[0xFF, 0x15], slot[0]); // call [ExitProcess]
+        c.extend_from_slice(&[0x0F, 0x0B]);
+        c
+    })
 }
 
 /// Test `.exe` importing a DLL (`user32.dll`) that is not loaded in the process.

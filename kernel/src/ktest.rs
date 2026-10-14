@@ -83,6 +83,7 @@ const TESTS: &[(&str, TestFn)] = &[
         "exe_calls_forwarded_kernel32_export",
         exe_calls_forwarded_kernel32_export,
     ),
+    ("exit_code_is_reported", exit_code_is_reported),
     (
         "loader_rejects_missing_dependency",
         loader_rejects_missing_dependency,
@@ -1087,8 +1088,9 @@ fn exe_calls_forwarded_kernel32_export() -> Result<(), &'static str> {
     if !have_both_dlls() {
         return Ok(());
     }
-    // kernel32 exports RtlExitUserProcess as a FORWARDER to ntdll.NtTerminateProcess;
-    // the exe's IAT must end up pointing at ntdll's stub, so the status reaches the kernel.
+    // kernel32 exports TukosCloseForward as a FORWARDER to ntdll.NtClose; the exe's
+    // IAT must end up at ntdll's stub, so NtClose(0x1234) returns STATUS_INVALID_HANDLE,
+    // which the exe passes to ExitProcess.
     crate::syscall::LAST_TERMINATE_STATUS.store(u64::MAX, Ordering::SeqCst);
     let before = crate::mem::frames::free_frame_count();
     crate::process::spawn_exe_image_with_k32(crate::process::build_exe_calling_forwarder());
@@ -1096,7 +1098,7 @@ fn exe_calls_forwarded_kernel32_export() -> Result<(), &'static str> {
         crate::sched::yield_now();
         let st = crate::syscall::LAST_TERMINATE_STATUS.load(Ordering::SeqCst);
         if st != u64::MAX {
-            if st != 0x5A5A {
+            if st != crate::syscall::STATUS_INVALID_HANDLE {
                 return Err("forwarder nao levou ao NtTerminateProcess do ntdll");
             }
             if crate::mem::frames::free_frame_count() == before {
@@ -1105,6 +1107,29 @@ fn exe_calls_forwarded_kernel32_export() -> Result<(), &'static str> {
         }
     }
     Err("exe que chama o forwarder nao terminou/recolheu")
+}
+
+fn exit_code_is_reported() -> Result<(), &'static str> {
+    use core::sync::atomic::Ordering;
+    if !have_both_dlls() {
+        return Ok(());
+    }
+    crate::syscall::LAST_TERMINATE_STATUS.store(u64::MAX, Ordering::SeqCst);
+    let before = crate::mem::frames::free_frame_count();
+    crate::process::spawn_exe_image_with_k32(crate::process::build_exe_exit_code_2a());
+    for _ in 0..12000 {
+        crate::sched::yield_now();
+        let st = crate::syscall::LAST_TERMINATE_STATUS.load(Ordering::SeqCst);
+        if st != u64::MAX {
+            if st != 0x2A {
+                return Err("ExitProcess(0x2A) nao reportou 0x2A ao kernel");
+            }
+            if crate::mem::frames::free_frame_count() == before {
+                return Ok(());
+            }
+        }
+    }
+    Err("exe que chama ExitProcess(0x2A) nao terminou/recolheu")
 }
 
 fn loader_rejects_missing_dependency() -> Result<(), &'static str> {

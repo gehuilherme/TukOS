@@ -135,6 +135,13 @@ pub extern "system" fn NtClose() {
     core::arch::naked_asm!("mov r10, rcx", "mov eax, 4", "syscall", "ret");
 }
 
+/// `RtlExitUserProcess(code)`: a real function (NOT a bare forwarder to the
+/// 2-arg `NtTerminateProcess`) that terminates the current process with `code`.
+#[unsafe(no_mangle)]
+pub extern "system" fn RtlExitUserProcess(code: u32) -> ! {
+    die(code)
+}
+
 // ---------------------------------------------------------------------------
 // LdrInitializeThunk: the user-mode import loader.
 // ---------------------------------------------------------------------------
@@ -154,14 +161,16 @@ const ST_NO_DEP: u32 = 0xC000_7009;
 /// A forwarder chain exceeded `MAX_FORWARD_HOPS` (cycle or absurd depth).
 const ST_FWD_LIMIT: u32 = 0xC000_700A;
 
-/// NtTerminateProcess(status) via syscall; never returns.
+/// NtTerminateProcess(NtCurrentProcess(), status) via syscall; never returns.
+/// ABI: ProcessHandle = arg0 (r10), ExitStatus = arg1 (rdx).
 fn die(status: u32) -> ! {
     loop {
         unsafe {
             core::arch::asm!(
                 "syscall",
                 in("eax") 3u32,
-                in("r10") u64::from(status),
+                in("r10") u64::MAX, // (HANDLE)-1 = NtCurrentProcess
+                in("rdx") u64::from(status),
                 out("rcx") _,
                 out("r11") _,
                 options(nostack)

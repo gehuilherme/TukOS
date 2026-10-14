@@ -120,6 +120,14 @@ unsafe extern "system" {
         key: *const u32,
     ) -> i32;
     fn NtTerminateProcess(process: isize, status: i32) -> i32;
+    fn NtClose(handle: isize) -> i32;
+}
+
+/// `CloseHandle` over `NtClose` (also keeps the `NtClose` import alive, which the
+/// `TukosCloseForward -> ntdll.NtClose` forwarder export needs at link time).
+#[unsafe(no_mangle)]
+pub extern "system" fn CloseHandle(handle: isize) -> i32 {
+    i32::from(unsafe { NtClose(handle) } >= 0)
 }
 
 /// IO_STATUS_BLOCK (x64): Status @0, Information @8.

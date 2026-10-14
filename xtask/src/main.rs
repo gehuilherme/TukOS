@@ -32,6 +32,8 @@ fn main() -> ExitCode {
             "arch-x86_64",
             "-p",
             "mm",
+            "-p",
+            "pe",
         ])),
         _ => {
             eprintln!("{USAGE}");
