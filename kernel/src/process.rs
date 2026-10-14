@@ -303,6 +303,33 @@ const TEB_PROBE_TEXT: [u8; 39] = [
     0x0F, 0x0B, // ud2
 ];
 
+/// Machine code of `nt_hello`: NtWriteFile(1, msg, 6) then NtTerminateProcess(0).
+/// `msg` sits right after the code (offset 48); the lea displacement is
+/// 48 - 7 (address of the instruction following the lea) = 41 = 0x29.
+const NT_HELLO_TEXT: [u8; 54] = [
+    0x48, 0x8D, 0x35, 0x29, 0x00, 0x00, 0x00, // lea rsi, [rip + 0x29] -> msg
+    0x48, 0xC7, 0xC0, 0x02, 0x00, 0x00, 0x00, // mov rax, 2 (NT_WRITE_FILE)
+    0x48, 0xC7, 0xC7, 0x01, 0x00, 0x00, 0x00, // mov rdi, 1 (handle)
+    0x48, 0xC7, 0xC2, 0x06, 0x00, 0x00, 0x00, // mov rdx, 6 (length)
+    0x0F, 0x05, // syscall
+    0x48, 0xC7, 0xC0, 0x03, 0x00, 0x00, 0x00, // mov rax, 3 (NT_TERMINATE_PROCESS)
+    0x48, 0xC7, 0xC7, 0x00, 0x00, 0x00, 0x00, // mov rdi, 0
+    0x0F, 0x05, // syscall
+    0x0F, 0x0B, // ud2
+    b'T', b'u', b'k', b'O', b'S', b'\n', // msg
+];
+
+/// Starts a PE that prints "TukOS" via NtWriteFile and ends via NtTerminateProcess.
+pub fn spawn_nt_hello_pe() -> usize {
+    let pe = build_pe(
+        0x1000,
+        &NT_HELLO_TEXT,
+        NT_HELLO_TEXT.len() as u32,
+        SCN_CODE_EXEC_READ,
+    );
+    spawn_pe_inner(&pe, PE_IMAGE_BASE).0
+}
+
 /// Starts a PE whose code reports its own TEB address; returns that TEB VA.
 pub fn spawn_teb_probe_pe() -> u64 {
     let pe = build_pe(

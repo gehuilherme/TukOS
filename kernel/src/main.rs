@@ -18,6 +18,7 @@ mod syscall;
 mod teb;
 mod trap;
 mod user_demo;
+mod usercopy;
 
 use limine::BaseRevision;
 use limine::request::{

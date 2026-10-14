@@ -59,6 +59,16 @@ const TESTS: &[(&str, TestFn)] = &[
     ),
     ("pe_loads_runs_and_exits", pe_loads_runs_and_exits),
     ("load_zero_fills_bss", load_zero_fills_bss),
+    (
+        "ntwritefile_prints_user_buffer",
+        ntwritefile_prints_user_buffer,
+    ),
+    (
+        "ntwritefile_rejects_kernel_pointer",
+        ntwritefile_rejects_kernel_pointer,
+    ),
+    ("ntwritefile_rejects_unmapped", ntwritefile_rejects_unmapped),
+    ("nt_terminate_exits_and_reaps", nt_terminate_exits_and_reaps),
     ("two_user_processes_preempt", two_user_processes_preempt),
     ("reloc_dir64_crosses_page", reloc_dir64_crosses_page),
     ("stack_placed_above_image", stack_placed_above_image),
@@ -567,6 +577,51 @@ fn load_zero_fills_bss() -> Result<(), &'static str> {
         }
     }
     Ok(())
+}
+
+fn ntwritefile_rejects_kernel_pointer() -> Result<(), &'static str> {
+    // A higher-half (kernel) pointer must be rejected, not read.
+    if crate::usercopy::copy_from_user(0xffff_ff80_0000_0000, 8).is_some() {
+        return Err("copy_from_user aceitou ponteiro de kernel");
+    }
+    Ok(())
+}
+
+fn ntwritefile_rejects_unmapped() -> Result<(), &'static str> {
+    // A low (user-range) but unmapped address must be rejected.
+    if crate::usercopy::copy_from_user(0x0000_0000_1234_0000, 8).is_some() {
+        return Err("copy_from_user aceitou endereco nao mapeado");
+    }
+    Ok(())
+}
+
+fn ntwritefile_prints_user_buffer() -> Result<(), &'static str> {
+    use core::sync::atomic::Ordering;
+    crate::syscall::LAST_WRITE_LEN.store(0, Ordering::SeqCst);
+    crate::process::spawn_nt_hello_pe();
+    for _ in 0..8000 {
+        crate::sched::yield_now();
+        if crate::syscall::LAST_WRITE_LEN.load(Ordering::SeqCst) == 6 {
+            // "TukOS\n" is 6 bytes; the recorded bytes must match.
+            if crate::syscall::last_write_is(b"TukOS\n") {
+                return Ok(());
+            }
+            return Err("NtWriteFile registrou bytes errados");
+        }
+    }
+    Err("NtWriteFile nao foi chamada pelo processo")
+}
+
+fn nt_terminate_exits_and_reaps() -> Result<(), &'static str> {
+    let before = crate::mem::frames::free_frame_count();
+    crate::process::spawn_nt_hello_pe(); // ends with NtTerminateProcess
+    for _ in 0..8000 {
+        crate::sched::yield_now();
+        if crate::mem::frames::free_frame_count() == before {
+            return Ok(());
+        }
+    }
+    Err("NtTerminateProcess nao recuperou os frames")
 }
 
 fn two_user_processes_preempt() -> Result<(), &'static str> {
