@@ -27,6 +27,14 @@ const TESTS: &[(&str, TestFn)] = &[
     ("preemption_runs_both_threads", preemption_runs_both_threads),
     ("rsp0_set_before_user", rsp0_set_before_user),
     (
+        "enter_user_returns_after_exit",
+        enter_user_returns_after_exit,
+    ),
+    (
+        "syscall_roundtrip_preserves_gs",
+        syscall_roundtrip_preserves_gs,
+    ),
+    (
         "syscall_dispatch_records_mark",
         syscall_dispatch_records_mark,
     ),
@@ -345,6 +353,30 @@ fn syscall_dispatch_records_mark() -> Result<(), &'static str> {
     }
     if crate::syscall::LAST_MARK.load(Ordering::SeqCst) != 0xCAFE {
         return Err("SYS_WRITE_MARK nao registrou o argumento");
+    }
+    Ok(())
+}
+
+fn enter_user_returns_after_exit() -> Result<(), &'static str> {
+    use core::sync::atomic::Ordering;
+    crate::syscall::LAST_MARK.store(0, Ordering::SeqCst);
+    let code = crate::user_demo::run();
+    if code != 0x2A {
+        return Err("codigo de saida do usuario incorreto");
+    }
+    if crate::syscall::LAST_MARK.load(Ordering::SeqCst) != 0xCAFE {
+        return Err("a syscall de escrita do usuario nao chegou ao kernel");
+    }
+    Ok(())
+}
+
+fn syscall_roundtrip_preserves_gs() -> Result<(), &'static str> {
+    // After a full user excursion, the kernel GS base must still point at the
+    // per-CPU block (a mismatched swapgs count would leave it wrong).
+    let before = arch_x86_64::percpu::gs_base();
+    let _ = crate::user_demo::run();
+    if arch_x86_64::percpu::gs_base() != before {
+        return Err("GS base do kernel mudou apos a excursao (swapgs desbalanceado)");
     }
     Ok(())
 }

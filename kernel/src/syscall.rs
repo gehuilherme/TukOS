@@ -23,8 +23,11 @@ pub extern "C" fn dispatch(nr: u64, a0: u64, _a1: u64, _a2: u64, _a3: u64) -> u6
             0
         }
         SYS_EXIT => {
-            // Handled specially by the Ring 3 return path in Task 3; if reached
-            // here (e.g. a direct call), it is a no-op returning the exit code.
+            #[cfg(target_os = "none")]
+            unsafe {
+                arch_x86_64::usermode::exit_to_kernel(a0)
+            }
+            #[cfg(not(target_os = "none"))]
             a0
         }
         _ => u64::MAX,

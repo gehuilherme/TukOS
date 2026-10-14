@@ -14,3 +14,4 @@ pub mod percpu;
 pub mod port;
 pub mod syscall;
 pub mod trap;
+pub mod usermode;

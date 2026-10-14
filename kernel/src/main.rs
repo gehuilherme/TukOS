@@ -14,6 +14,7 @@ mod sched;
 mod serial;
 mod syscall;
 mod trap;
+mod user_demo;
 
 use limine::BaseRevision;
 use limine::request::{
