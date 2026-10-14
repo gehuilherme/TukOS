@@ -466,3 +466,244 @@ pub extern "system" fn LdrInitializeThunk() -> ! {
         main = sym ldr_main,
     );
 }
+
+// ---------------------------------------------------------------------------
+// User-mode heap: RtlAllocateHeap / RtlFreeHeap over NtAllocateVirtualMemory.
+//
+// SINGLE-THREAD ASSUMPTION: TukOS user mode has exactly one thread per process, so
+// the control structure is a plain `static mut` with no locking. When user threads
+// exist this MUST gain a lock.
+//
+// Layout. A heap is a chain of SEGMENTS (each one NtAllocateVirtualMemory region,
+// page-aligned, zero-filled, RW|NX):
+//
+//   [seg header 16: next_seg, seg_size][block][block]...[end sentinel 16]
+//
+// Every block starts with a 16-byte header {size_and_flag, prev_size}; the payload
+// follows the header, so payloads are 16-byte aligned (segment base is page-aligned,
+// header and block sizes are multiples of 16). `size_and_flag` is the TOTAL block
+// size (header included) with bit 0 = USED. `prev_size` is the total size of the
+// physically previous block in the segment (0 for the first), which gives O(1)
+// backward coalescing. The end sentinel is a zero-size USED header, so forward walks
+// and merges stop at the segment end and never cross into another region.
+// Allocation is first-fit over all blocks (the "free list" is the implicit list of
+// free blocks), splitting when the remainder can hold a minimal block; free merges
+// with free neighbours. Segments are never returned to the OS.
+// ---------------------------------------------------------------------------
+
+const HEAP_ZERO_MEMORY: u32 = 0x8;
+const HDR: usize = 16;
+const MIN_BLOCK: usize = 32;
+const SEG_HDR: usize = 16;
+const SEG_MIN: usize = 64 * 1024;
+const PAGE: usize = 4096;
+const USED: usize = 1;
+
+#[repr(C)]
+struct HeapCtl {
+    /// Address of the first segment (0 = heap not initialised yet).
+    segs: usize,
+}
+
+static mut PROCESS_HEAP: HeapCtl = HeapCtl { segs: 0 };
+
+type NtAllocVm = extern "system" fn(isize, *mut usize, usize, *mut usize, u32, u32) -> i32;
+
+#[inline]
+unsafe fn blk_size(b: usize) -> usize {
+    unsafe { core::ptr::read(b as *const usize) & !USED }
+}
+#[inline]
+unsafe fn blk_used(b: usize) -> bool {
+    unsafe { core::ptr::read(b as *const usize) & USED != 0 }
+}
+#[inline]
+unsafe fn blk_set(b: usize, size: usize, used: bool, prev: usize) {
+    unsafe {
+        core::ptr::write(b as *mut usize, size | usize::from(used));
+        core::ptr::write((b + 8) as *mut usize, prev);
+    }
+}
+#[inline]
+unsafe fn blk_prev(b: usize) -> usize {
+    unsafe { core::ptr::read((b + 8) as *const usize) }
+}
+
+/// Maps a fresh segment able to hold a block of `need` bytes and links it last.
+/// Returns false on failure.
+unsafe fn heap_grow(h: *mut HeapCtl, need: usize) -> bool {
+    unsafe {
+        let Some(min) = need.checked_add(SEG_HDR + HDR + PAGE - 1) else {
+            return false;
+        };
+        let want = (min & !(PAGE - 1)).max(SEG_MIN);
+        let nt: NtAllocVm = core::mem::transmute(NtAllocateVirtualMemory as extern "system" fn());
+        let mut base: usize = 0;
+        let mut size: usize = want;
+        let st = nt(-1, &mut base, 0, &mut size, 0x3000, 0x04);
+        if st < 0 || base == 0 || size < want || !base.is_multiple_of(PAGE) {
+            return false;
+        }
+        core::ptr::write(base as *mut usize, 0);
+        core::ptr::write((base + 8) as *mut usize, size);
+        let first = base + SEG_HDR;
+        let first_size = size - SEG_HDR - HDR;
+        blk_set(first, first_size, false, 0);
+        blk_set(first + first_size, 0, true, first_size); // end sentinel
+        // Append at the TAIL so allocation (first-fit) prefers the oldest segment.
+        if (*h).segs == 0 {
+            (*h).segs = base;
+        } else {
+            let mut last = (*h).segs;
+            loop {
+                let nx = core::ptr::read(last as *const usize);
+                if nx == 0 {
+                    break;
+                }
+                last = nx;
+            }
+            core::ptr::write(last as *mut usize, base);
+        }
+        true
+    }
+}
+
+/// First-fit search for a free block of at least `need` bytes; splits it and marks
+/// the result used. Returns the block address or 0.
+unsafe fn heap_take(h: *mut HeapCtl, need: usize) -> usize {
+    unsafe {
+        let mut seg = (*h).segs;
+        while seg != 0 {
+            let seg_size = core::ptr::read((seg + 8) as *const usize);
+            let end = seg + seg_size - HDR; // address of the end sentinel
+            let mut b = seg + SEG_HDR;
+            while b < end {
+                let sz = blk_size(b);
+                if !blk_used(b) && sz >= need {
+                    let rest = sz - need;
+                    if rest >= MIN_BLOCK {
+                        let nb = b + need;
+                        blk_set(b, need, true, blk_prev(b));
+                        blk_set(nb, rest, false, need);
+                        // The block after the remainder now follows a smaller block.
+                        core::ptr::write((nb + rest + 8) as *mut usize, rest);
+                    } else {
+                        blk_set(b, sz, true, blk_prev(b));
+                    }
+                    return b;
+                }
+                b += sz;
+            }
+            seg = core::ptr::read(seg as *const usize);
+        }
+        0
+    }
+}
+
+/// The process heap handle (TukOS addition used by kernel32!GetProcessHeap): the
+/// address of the control structure. Initialises the heap (first segment) on first
+/// use; returns null if that fails. Always returns the same value.
+#[unsafe(no_mangle)]
+pub extern "system" fn RtlGetProcessHeap() -> *mut u8 {
+    unsafe {
+        let h = core::ptr::addr_of_mut!(PROCESS_HEAP);
+        if (*h).segs == 0 && !heap_grow(h, MIN_BLOCK) {
+            return core::ptr::null_mut();
+        }
+        h as *mut u8
+    }
+}
+
+/// `RtlAllocateHeap`: returns a 16-byte aligned block of at least `size` bytes, or
+/// null (bad handle, overflow, out of memory). `HEAP_ZERO_MEMORY` zero-fills.
+///
+/// # Safety
+/// `heap` must be a handle from `RtlGetProcessHeap`.
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn RtlAllocateHeap(heap: *mut u8, flags: u32, size: usize) -> *mut u8 {
+    unsafe {
+        let h = core::ptr::addr_of_mut!(PROCESS_HEAP);
+        if !core::ptr::eq(heap, h as *mut u8) || (*h).segs == 0 {
+            return core::ptr::null_mut();
+        }
+        let Some(payload) = size.checked_add(15) else {
+            return core::ptr::null_mut();
+        };
+        let Some(need) = (payload & !15).checked_add(HDR) else {
+            return core::ptr::null_mut();
+        };
+        let need = need.max(MIN_BLOCK);
+        let mut b = heap_take(h, need);
+        if b == 0 {
+            if !heap_grow(h, need) {
+                return core::ptr::null_mut();
+            }
+            b = heap_take(h, need);
+            if b == 0 {
+                return core::ptr::null_mut();
+            }
+        }
+        let p = (b + HDR) as *mut u8;
+        if flags & HEAP_ZERO_MEMORY != 0 {
+            memset(p, 0, blk_size(b) - HDR);
+        }
+        p
+    }
+}
+
+/// `RtlFreeHeap`: 1 on success (NULL is a successful no-op), 0 if `ptr` cannot be a
+/// live block of this heap (outside every segment, misaligned, or already free).
+/// Interior or foreign pointers that pass those checks are undefined behaviour, as
+/// on Windows.
+///
+/// # Safety
+/// `ptr` must be null or a live pointer returned by `RtlAllocateHeap` for `heap`.
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn RtlFreeHeap(heap: *mut u8, _flags: u32, ptr: *mut u8) -> i32 {
+    unsafe {
+        let h = core::ptr::addr_of_mut!(PROCESS_HEAP);
+        if !core::ptr::eq(heap, h as *mut u8) {
+            return 0;
+        }
+        if ptr.is_null() {
+            return 1;
+        }
+        let p = ptr as usize;
+        if !p.is_multiple_of(16) {
+            return 0;
+        }
+        let mut seg = (*h).segs;
+        while seg != 0 {
+            let seg_size = core::ptr::read((seg + 8) as *const usize);
+            let end = seg + seg_size - HDR;
+            if p >= seg + SEG_HDR + HDR && p < end {
+                let mut b = p - HDR;
+                if !blk_used(b) {
+                    return 0;
+                }
+                let mut sz = blk_size(b);
+                let mut prev = blk_prev(b);
+                // Merge with the next block if free (the sentinel is USED).
+                let next = b + sz;
+                if !blk_used(next) {
+                    sz += blk_size(next);
+                }
+                // Merge into the previous block if free.
+                if prev != 0 {
+                    let pb = b - prev;
+                    if !blk_used(pb) {
+                        sz += prev;
+                        prev = blk_prev(pb);
+                        b = pb;
+                    }
+                }
+                blk_set(b, sz, false, prev);
+                // The block after the merged one records its new predecessor size.
+                core::ptr::write((b + sz + 8) as *mut usize, sz);
+                return 1;
+            }
+            seg = core::ptr::read(seg as *const usize);
+        }
+        0
+    }
+}

@@ -1,7 +1,7 @@
 //! TukOS kernel32.dll: the minimal Win32 layer (GetStdHandle / WriteFile /
 //! ExitProcess) implemented over our ntdll.
 //!
-//! No CRT, no heap. The only import is `ntdll.dll`, declared with `raw-dylib`
+//! No CRT, no Rust allocator (the Heap* API forwards to ntdll). The only import is `ntdll.dll`, declared with `raw-dylib`
 //! so the compiler synthesizes the import directory (no import library and no
 //! build-order dependency on the ntdll crate).
 #![no_std]
@@ -121,6 +121,9 @@ unsafe extern "system" {
     ) -> i32;
     fn NtTerminateProcess(process: isize, status: i32) -> i32;
     fn NtClose(handle: isize) -> i32;
+    fn RtlGetProcessHeap() -> *mut c_void;
+    fn RtlAllocateHeap(heap: *mut c_void, flags: u32, size: usize) -> *mut c_void;
+    fn RtlFreeHeap(heap: *mut c_void, flags: u32, ptr: *mut c_void) -> i32;
 }
 
 /// `CloseHandle` over `NtClose` (also keeps the `NtClose` import alive, which the
@@ -221,4 +224,29 @@ pub extern "system" fn ExitProcess(code: u32) -> ! {
     loop {
         unsafe { core::arch::asm!("ud2", options(nomem, nostack)) };
     }
+}
+
+/// `GetProcessHeap`: the process heap handle (ntdll creates the heap on first use and
+/// always returns the same handle). Null if the heap cannot be created.
+#[unsafe(no_mangle)]
+pub extern "system" fn GetProcessHeap() -> *mut c_void {
+    unsafe { RtlGetProcessHeap() }
+}
+
+/// `HeapAlloc` over `RtlAllocateHeap` (`HEAP_ZERO_MEMORY` = 0x8 honoured by ntdll).
+///
+/// # Safety
+/// `heap` must be a handle from `GetProcessHeap`.
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn HeapAlloc(heap: *mut c_void, flags: u32, size: usize) -> *mut c_void {
+    unsafe { RtlAllocateHeap(heap, flags, size) }
+}
+
+/// `HeapFree` over `RtlFreeHeap`; nonzero on success.
+///
+/// # Safety
+/// `ptr` must be null or a live block returned by `HeapAlloc` on `heap`.
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn HeapFree(heap: *mut c_void, flags: u32, ptr: *mut c_void) -> i32 {
+    unsafe { RtlFreeHeap(heap, flags, ptr) }
 }

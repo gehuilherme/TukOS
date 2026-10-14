@@ -78,6 +78,7 @@ const TESTS: &[(&str, TestFn)] = &[
     ),
     ("peb_ldr_list_well_formed", peb_ldr_list_well_formed),
     ("exe_uses_kernel32_and_runs", exe_uses_kernel32_and_runs),
+    ("heap_alloc_write_free", heap_alloc_write_free),
     ("peb_ldr_three_modules", peb_ldr_three_modules),
     (
         "exe_calls_forwarded_kernel32_export",
@@ -1048,6 +1049,43 @@ fn exe_uses_kernel32_and_runs() -> Result<(), &'static str> {
         }
     }
     Err("o .exe que usa kernel32->ntdll nao imprimiu/saiu")
+}
+
+fn heap_alloc_write_free() -> Result<(), &'static str> {
+    use core::sync::atomic::Ordering;
+    if !have_both_dlls() {
+        return Ok(()); // ntdll/kernel32 not embedded on this host: skip.
+    }
+    crate::syscall::LAST_WRITE_LEN.store(0, Ordering::SeqCst);
+    crate::syscall::LAST_TERMINATE_STATUS.store(u64::MAX, Ordering::SeqCst);
+    let before = crate::mem::frames::free_frame_count();
+    // exe -> kernel32!{GetProcessHeap,HeapAlloc,HeapFree,..} -> ntdll!{RtlGetProcessHeap,
+    // RtlAllocateHeap,RtlFreeHeap} -> NtAllocateVirtualMemory (Ring 3, end to end).
+    // The exe exits with 0xBAD (and does not print) if any heap check fails.
+    crate::process::spawn_exe_image_with_k32(crate::process::build_exe_heap_test());
+    for _ in 0..40000 {
+        crate::sched::yield_now();
+        let st = crate::syscall::LAST_TERMINATE_STATUS.load(Ordering::SeqCst);
+        if st != u64::MAX {
+            if st != 0 {
+                return Err(
+                    "heap: o exe falhou (0xBAD = sobreposicao/reuso/zeragem; outro = loader)",
+                );
+            }
+            if crate::syscall::LAST_WRITE_LEN.load(Ordering::SeqCst) != 6
+                || !crate::syscall::last_write_is(
+                    b"TukOS
+",
+                )
+            {
+                return Err("heap: saiu com 0 mas nao imprimiu TukOS");
+            }
+            if crate::mem::frames::free_frame_count() == before {
+                return Ok(());
+            }
+        }
+    }
+    Err("heap: o exe nao terminou/recolheu (frames vazados?)")
 }
 
 fn peb_ldr_three_modules() -> Result<(), &'static str> {

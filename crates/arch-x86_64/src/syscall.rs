@@ -70,7 +70,9 @@ unsafe extern "C" {
 // dispatch(rdi=nr, rsi=a0, rdx=a1, rcx=a2, r8=a3, r9=user_rsp). Each register is
 // overwritten only after its old value was read: rsi<-r10, rdi<-rax, rcx<-r8
 // (a2, before r8 changes), r8<-r9 (a3, before r9 changes), r9<-saved user rsp.
-// rdx (a1) is already in place.
+// rdx (a1) is already in place. rsi/rdi are CALLEE-SAVED in the Windows x64 ABI
+// (user code keeps live values in them across a syscall), so they are saved here
+// and restored before sysret; the SysV dispatch call preserves rbx/rbp/r12-r15.
 #[cfg(target_os = "none")]
 core::arch::global_asm!(
     r#"
@@ -83,12 +85,16 @@ tukos_syscall_entry:
     and rsp, -16
     push rcx
     push r11
+    push rsi
+    push rdi
     mov rsi, r10
     mov rdi, rax
     mov rcx, r8
     mov r8,  r9
     mov r9,  gs:[{off_user_rsp}]
     call tukos_syscall_dispatch
+    pop rdi
+    pop rsi
     pop r11
     pop rcx
     mov rsp, gs:[{off_user_rsp}]

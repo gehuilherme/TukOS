@@ -737,9 +737,14 @@ pub fn spawn_exe_image_with_k32(exe: alloc::vec::Vec<u8>) {
 
 const TEXT_RVA: u32 = 0x1000;
 const DATA_RVA: u32 = 0x2000;
-const DATA_RAW_OFF: usize = 0x400;
+const DATA_RAW_OFF: usize = 0x1000;
 /// Offset of the "TukOS\n" message in the `.data` of `build_import_exe`.
-const IMPORT_EXE_MSG_OFF: u32 = 0xC0;
+const IMPORT_EXE_MSG_OFF: u32 = 0x1C0;
+/// `.data` offsets of `build_import_exe`: INT, IAT (8 slots + null), DLL name, hint/names.
+const IMP_INT: usize = 0x40;
+const IMP_IAT: usize = 0x90;
+const IMP_NAME: usize = 0xE0;
+const IMP_HINTS: usize = 0xF0;
 
 /// Appends `opcode` + a rip-relative disp32 aimed at `target_rva` (the exe's `.text`
 /// sits at `TEXT_RVA`).
@@ -750,9 +755,9 @@ fn rip_rel_to(code: &mut alloc::vec::Vec<u8>, opcode: &[u8], target_rva: u32) {
 }
 
 /// Builds a two-section test `.exe` (`.text` R+X at 0x1000, `.data` R+W at 0x2000)
-/// importing `funcs` (at most 3, by name) from `dll`. `.data` holds: descriptor 0x00,
-/// INT 0x40, IAT 0x60 (slot i at 0x60+8i), DLL name 0x80, hint/name entries from
-/// 0x90, message 0xC0. `first_thunk` overrides the descriptor's FirstThunk RVA and
+/// importing `funcs` (at most 8, by name) from `dll`. `.data` holds: descriptor 0x00,
+/// INT 0x40, IAT 0x90 (slot i at 0x90+8i), DLL name 0xE0, hint/name entries from
+/// 0xF0, message 0x1C0. `first_thunk` overrides the descriptor's FirstThunk RVA and
 /// `dir12` sets data directory #12 (both used to craft hostile exes). `code` gets the
 /// IAT slot RVAs and the message RVA and returns the `.text` bytes (padded to 32).
 fn build_import_exe(
@@ -763,27 +768,27 @@ fn build_import_exe(
     code: impl FnOnce(&[u32], u32) -> alloc::vec::Vec<u8>,
 ) -> alloc::vec::Vec<u8> {
     const OPT_SIZE: usize = 112 + 16 * 8;
-    assert!(funcs.len() <= 3 && dll.len() < 15);
+    assert!(funcs.len() <= 8 && dll.len() < 15);
     let slots: alloc::vec::Vec<u32> = (0..funcs.len() as u32)
-        .map(|i| DATA_RVA + 0x60 + 8 * i)
+        .map(|i| DATA_RVA + IMP_IAT as u32 + 8 * i)
         .collect();
     let mut c = code(&slots, DATA_RVA + IMPORT_EXE_MSG_OFF);
     while c.len() < 32 {
         c.push(0xCC);
     }
 
-    let mut d = alloc::vec![0u8; 0xE0];
-    put(&mut d, 0, &(DATA_RVA + 0x40).to_le_bytes()); // OriginalFirstThunk
-    put(&mut d, 12, &(DATA_RVA + 0x80).to_le_bytes()); // Name
-    let ft = first_thunk.unwrap_or(DATA_RVA + 0x60);
+    let mut d = alloc::vec![0u8; IMPORT_EXE_MSG_OFF as usize + 0x20];
+    put(&mut d, 0, &(DATA_RVA + IMP_INT as u32).to_le_bytes()); // OriginalFirstThunk
+    put(&mut d, 12, &(DATA_RVA + IMP_NAME as u32).to_le_bytes()); // Name
+    let ft = first_thunk.unwrap_or(DATA_RVA + IMP_IAT as u32);
     put(&mut d, 16, &ft.to_le_bytes()); // FirstThunk
-    put(&mut d, 0x80, dll.as_bytes()); // NUL already there (zeroed)
-    let mut hn = 0x90usize;
+    put(&mut d, IMP_NAME, dll.as_bytes()); // NUL already there (zeroed)
+    let mut hn = IMP_HINTS;
     for (i, f) in funcs.iter().enumerate() {
         assert!(hn + 2 + f.len() < IMPORT_EXE_MSG_OFF as usize);
         let rva = u64::from(DATA_RVA) + hn as u64;
-        put(&mut d, 0x40 + 8 * i, &rva.to_le_bytes()); // INT
-        put(&mut d, 0x60 + 8 * i, &rva.to_le_bytes()); // IAT (pre-bind = INT)
+        put(&mut d, IMP_INT + 8 * i, &rva.to_le_bytes()); // INT
+        put(&mut d, IMP_IAT + 8 * i, &rva.to_le_bytes()); // IAT (pre-bind = INT)
         put(&mut d, hn + 2, f.as_bytes()); // hint(2)=0, name, NUL
         hn += (2 + f.len() + 1 + 1) & !1;
     }
@@ -876,6 +881,148 @@ pub fn build_exe_calling_forwarder() -> alloc::vec::Vec<u8> {
             c.extend_from_slice(&[0x89, 0xC1]); // mov ecx, eax
             rip_rel_to(&mut c, &[0xFF, 0x15], slot[1]); // call [ExitProcess]
             c.extend_from_slice(&[0x0F, 0x0B]);
+            c
+        },
+    )
+}
+
+/// Test `.exe` for the user heap (imports kernel32 only): `GetProcessHeap` (twice:
+/// same handle), four `HeapAlloc`s (24, 100, 5000, 70000 bytes: the last forces a
+/// second segment), a distinct fill byte in each, a read-back of every block (no
+/// overlap), `HeapFree` of the first two, a `HeapAlloc(50)` that must REUSE the first
+/// block's address, a `HeapAlloc(HEAP_ZERO_MEMORY, 60)` that must come back zeroed
+/// although it reuses bytes the freed block dirtied, a final read-back of everything,
+/// frees, then `WriteFile("TukOS\n")` and `ExitProcess(0)`. Any failure ends with
+/// `ExitProcess(0xBAD)` without writing.
+pub fn build_exe_heap_test() -> alloc::vec::Vec<u8> {
+    use alloc::vec::Vec;
+    const H: u8 = 0x30;
+    const P0: u8 = 0x38;
+    const P1: u8 = 0x40;
+    const P2: u8 = 0x48;
+    const P3: u8 = 0x50;
+    const E: u8 = 0x58;
+    const F: u8 = 0x60;
+    const JE: u8 = 0x84;
+    const JNE: u8 = 0x85;
+    // jcc rel32 to the fail label (patched at the end).
+    fn jfail(c: &mut Vec<u8>, fails: &mut Vec<usize>, op: u8) {
+        c.extend_from_slice(&[0x0F, op, 0, 0, 0, 0]);
+        fails.push(c.len() - 4);
+    }
+    // [dst] = HeapAlloc([h], flags, size); null -> fail.
+    fn alloc(c: &mut Vec<u8>, fails: &mut Vec<usize>, slot: u32, flags: u8, size: u32, dst: u8) {
+        c.extend_from_slice(&[0x48, 0x8B, 0x4C, 0x24, H]); // mov rcx,[h]
+        c.extend_from_slice(&[0xBA, flags, 0, 0, 0]); // mov edx,flags
+        c.extend_from_slice(&[0x41, 0xB8]); // mov r8d,size
+        c.extend_from_slice(&size.to_le_bytes());
+        rip_rel_to(c, &[0xFF, 0x15], slot); // call [HeapAlloc]
+        c.extend_from_slice(&[0x48, 0x85, 0xC0]); // test rax,rax
+        jfail(c, fails, JE);
+        c.extend_from_slice(&[0x48, 0x89, 0x44, 0x24, dst]); // mov [dst],rax
+    }
+    // HeapFree([h], 0, [src]); 0 -> fail.
+    fn free(c: &mut Vec<u8>, fails: &mut Vec<usize>, slot: u32, src: u8) {
+        c.extend_from_slice(&[0x48, 0x8B, 0x4C, 0x24, H]); // mov rcx,[h]
+        c.extend_from_slice(&[0x31, 0xD2]); // xor edx,edx
+        c.extend_from_slice(&[0x4C, 0x8B, 0x44, 0x24, src]); // mov r8,[src]
+        rip_rel_to(c, &[0xFF, 0x15], slot);
+        c.extend_from_slice(&[0x85, 0xC0]); // test eax,eax
+        jfail(c, fails, JE);
+    }
+    // rep stosb of `size` x `pat` at [src].
+    fn fill(c: &mut Vec<u8>, src: u8, pat: u8, size: u32) {
+        c.extend_from_slice(&[0x48, 0x8B, 0x7C, 0x24, src, 0xB0, pat, 0xB9]);
+        c.extend_from_slice(&size.to_le_bytes());
+        c.extend_from_slice(&[0xF3, 0xAA]);
+    }
+    // repe scasb of `size` x `pat` at [src]; any mismatch -> fail.
+    fn check(c: &mut Vec<u8>, fails: &mut Vec<usize>, src: u8, pat: u8, size: u32) {
+        c.extend_from_slice(&[0x48, 0x8B, 0x7C, 0x24, src, 0xB0, pat, 0xB9]);
+        c.extend_from_slice(&size.to_le_bytes());
+        c.extend_from_slice(&[0xF3, 0xAE]);
+        jfail(c, fails, JNE);
+    }
+    build_import_exe(
+        "kernel32.dll",
+        &[
+            "GetProcessHeap",
+            "HeapAlloc",
+            "HeapFree",
+            "GetStdHandle",
+            "WriteFile",
+            "ExitProcess",
+        ],
+        None,
+        None,
+        |slot, msg| {
+            let mut c: Vec<u8> = Vec::new();
+            let mut fails: Vec<usize> = Vec::new();
+            c.extend_from_slice(&[0x48, 0x83, 0xEC, 0x68]); // sub rsp,0x68
+            rip_rel_to(&mut c, &[0xFF, 0x15], slot[0]); // call [GetProcessHeap]
+            c.extend_from_slice(&[0x48, 0x85, 0xC0]);
+            jfail(&mut c, &mut fails, JE);
+            c.extend_from_slice(&[0x48, 0x89, 0x44, 0x24, H]); // mov [h],rax
+            // The handle must be stable: a 2nd GetProcessHeap returns the same value.
+            rip_rel_to(&mut c, &[0xFF, 0x15], slot[0]);
+            c.extend_from_slice(&[0x48, 0x3B, 0x44, 0x24, H]); // cmp rax,[h]
+            jfail(&mut c, &mut fails, JNE);
+
+            alloc(&mut c, &mut fails, slot[1], 0, 24, P0);
+            alloc(&mut c, &mut fails, slot[1], 0, 100, P1);
+            alloc(&mut c, &mut fails, slot[1], 0, 5000, P2);
+            alloc(&mut c, &mut fails, slot[1], 0, 70000, P3);
+            fill(&mut c, P0, 0xA1, 24);
+            fill(&mut c, P1, 0xB2, 100);
+            fill(&mut c, P2, 0xC3, 5000);
+            fill(&mut c, P3, 0xD4, 70000);
+            check(&mut c, &mut fails, P0, 0xA1, 24);
+            check(&mut c, &mut fails, P1, 0xB2, 100);
+            check(&mut c, &mut fails, P2, 0xC3, 5000);
+            check(&mut c, &mut fails, P3, 0xD4, 70000);
+
+            free(&mut c, &mut fails, slot[2], P0);
+            free(&mut c, &mut fails, slot[2], P1);
+            // E = HeapAlloc(50): the coalesced hole is the first fit -> same address as P0.
+            alloc(&mut c, &mut fails, slot[1], 0, 50, E);
+            c.extend_from_slice(&[0x48, 0x8B, 0x44, 0x24, E]); // mov rax,[e]
+            c.extend_from_slice(&[0x48, 0x3B, 0x44, 0x24, P0]); // cmp rax,[p0]
+            jfail(&mut c, &mut fails, JNE);
+            fill(&mut c, E, 0xE5, 50);
+            // F = HeapAlloc(HEAP_ZERO_MEMORY, 60) reuses the dirty tail of the hole: zero.
+            alloc(&mut c, &mut fails, slot[1], 8, 60, F);
+            check(&mut c, &mut fails, F, 0x00, 60);
+            fill(&mut c, F, 0xF6, 60);
+            check(&mut c, &mut fails, E, 0xE5, 50);
+            check(&mut c, &mut fails, F, 0xF6, 60);
+            check(&mut c, &mut fails, P2, 0xC3, 5000);
+            check(&mut c, &mut fails, P3, 0xD4, 70000);
+            free(&mut c, &mut fails, slot[2], E);
+            free(&mut c, &mut fails, slot[2], F);
+            free(&mut c, &mut fails, slot[2], P2);
+            free(&mut c, &mut fails, slot[2], P3);
+
+            // WriteFile(GetStdHandle(-11), msg, 6, &n, 0); ExitProcess(0)
+            c.extend_from_slice(&[0xB9, 0xF5, 0xFF, 0xFF, 0xFF]);
+            rip_rel_to(&mut c, &[0xFF, 0x15], slot[3]);
+            c.extend_from_slice(&[0x48, 0x89, 0xC1]);
+            rip_rel_to(&mut c, &[0x48, 0x8D, 0x15], msg);
+            c.extend_from_slice(&[0x41, 0xB8, 6, 0, 0, 0]);
+            c.extend_from_slice(&[0x4C, 0x8D, 0x4C, 0x24, 0x38]); // lea r9,[rsp+0x38] (&n)
+            c.extend_from_slice(&[0x48, 0xC7, 0x44, 0x24, 0x20, 0, 0, 0, 0]);
+            rip_rel_to(&mut c, &[0xFF, 0x15], slot[4]);
+            c.extend_from_slice(&[0x31, 0xC9]);
+            rip_rel_to(&mut c, &[0xFF, 0x15], slot[5]);
+            c.extend_from_slice(&[0x0F, 0x0B]);
+            // fail: ExitProcess(0xBAD)
+            let fail_pos = c.len();
+            c.extend_from_slice(&[0xB9, 0xAD, 0x0B, 0, 0]);
+            rip_rel_to(&mut c, &[0xFF, 0x15], slot[5]);
+            c.extend_from_slice(&[0x0F, 0x0B]);
+            for f in fails {
+                let rel = (fail_pos as i32) - (f as i32 + 4);
+                c[f..f + 4].copy_from_slice(&rel.to_le_bytes());
+            }
             c
         },
     )
