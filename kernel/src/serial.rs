@@ -2,7 +2,7 @@
 
 use arch_x86_64::port::{inb, outb};
 use core::fmt;
-use spin::Mutex;
+use arch_x86_64::interrupts::IrqMutex;
 
 const COM1: u16 = 0x3F8;
 
@@ -24,7 +24,7 @@ impl fmt::Write for Serial {
     }
 }
 
-pub static SERIAL: Mutex<Serial> = Mutex::new(Serial);
+pub static SERIAL: IrqMutex<Serial> = IrqMutex::new(Serial);
 
 /// 115200 baud, 8N1, FIFO enabled.
 pub fn init() {

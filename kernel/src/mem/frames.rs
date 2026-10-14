@@ -4,7 +4,7 @@
 
 use limine::memory_map::{Entry, EntryType};
 use mm::frame::{BitmapAllocator, bitmap_words_for, total_frames_for};
-use spin::Mutex;
+use arch_x86_64::interrupts::IrqMutex;
 
 pub use mm::frame::FRAME_SIZE;
 
@@ -13,7 +13,7 @@ struct State {
     hhdm: u64,
 }
 
-static STATE: Mutex<Option<State>> = Mutex::new(None);
+static STATE: IrqMutex<Option<State>> = IrqMutex::new(None);
 
 pub fn hhdm_offset() -> u64 {
     STATE.lock().as_ref().expect("frames nao inicializado").hhdm

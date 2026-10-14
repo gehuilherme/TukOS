@@ -4,7 +4,7 @@
 use core::alloc::{GlobalAlloc, Layout};
 use mm::heap::FreeListHeap;
 use mm::paging::PageFlags;
-use spin::Mutex;
+use arch_x86_64::interrupts::IrqMutex;
 
 /// Heap virtual window: 2 MiB starting here (above the kernel image, below the
 /// HHDM). 512 pages.
@@ -12,7 +12,7 @@ const HEAP_START: u64 = 0xffff_ff80_0000_0000;
 const HEAP_PAGES: u64 = 512;
 const HEAP_SIZE: usize = (HEAP_PAGES * 4096) as usize;
 
-struct LockedHeap(Mutex<FreeListHeap>);
+struct LockedHeap(IrqMutex<FreeListHeap>);
 
 unsafe impl GlobalAlloc for LockedHeap {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
@@ -24,7 +24,7 @@ unsafe impl GlobalAlloc for LockedHeap {
 }
 
 #[global_allocator]
-static ALLOCATOR: LockedHeap = LockedHeap(Mutex::new(FreeListHeap::new()));
+static ALLOCATOR: LockedHeap = LockedHeap(IrqMutex::new(FreeListHeap::new()));
 
 /// Maps the heap window to fresh frames and initializes the free list.
 pub fn init() {

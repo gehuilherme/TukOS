@@ -2,7 +2,7 @@
 
 use core::fmt;
 use noto_sans_mono_bitmap::{FontWeight, RasterHeight, get_raster, get_raster_width};
-use spin::Mutex;
+use arch_x86_64::interrupts::IrqMutex;
 
 const WEIGHT: FontWeight = FontWeight::Regular;
 const HEIGHT: RasterHeight = RasterHeight::Size16;
@@ -19,7 +19,7 @@ pub struct FbCon {
 // The framebuffer is only touched through the mutex below.
 unsafe impl Send for FbCon {}
 
-pub static FBCON: Mutex<Option<FbCon>> = Mutex::new(None);
+pub static FBCON: IrqMutex<Option<FbCon>> = IrqMutex::new(None);
 
 impl FbCon {
     pub fn cell_width() -> usize {

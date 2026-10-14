@@ -94,3 +94,16 @@ pub unsafe fn write_cr3(phys: u64) {
 pub unsafe fn invlpg(virt: u64) {
     unsafe { asm!("invlpg [{}]", in(reg) virt, options(nostack, preserves_flags)) };
 }
+
+/// Enables maskable interrupts. Not `nomem`: it orders memory like `cli`.
+#[inline]
+pub fn sti() {
+    unsafe { asm!("sti", options(nostack)) };
+}
+
+#[inline]
+pub fn read_rflags() -> u64 {
+    let v: u64;
+    unsafe { asm!("pushfq", "pop {}", out(reg) v, options(nomem, preserves_flags)) };
+    v
+}
