@@ -12,4 +12,5 @@ pub mod interrupts;
 pub mod lapic;
 pub mod percpu;
 pub mod port;
+pub mod syscall;
 pub mod trap;

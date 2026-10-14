@@ -26,6 +26,10 @@ const TESTS: &[(&str, TestFn)] = &[
     ("yield_alternates_threads", yield_alternates_threads),
     ("preemption_runs_both_threads", preemption_runs_both_threads),
     ("rsp0_set_before_user", rsp0_set_before_user),
+    (
+        "syscall_dispatch_records_mark",
+        syscall_dispatch_records_mark,
+    ),
 ];
 
 fn ist_stacks_installed() -> Result<(), &'static str> {
@@ -326,6 +330,21 @@ fn rsp0_set_before_user() -> Result<(), &'static str> {
     // Per-CPU block must be installed (GS base non-zero) by kmain before tests.
     if arch_x86_64::percpu::gs_base() == 0 {
         return Err("GS base nao instalado");
+    }
+    Ok(())
+}
+
+fn syscall_dispatch_records_mark() -> Result<(), &'static str> {
+    use core::sync::atomic::Ordering;
+    // Call the dispatch function directly (no privilege change): proves the
+    // table wiring and SYS_WRITE_MARK semantics independent of the asm stub.
+    crate::syscall::LAST_MARK.store(0, Ordering::SeqCst);
+    let r = crate::syscall::dispatch(crate::syscall::SYS_WRITE_MARK, 0xCAFE, 0, 0, 0);
+    if r != 0 {
+        return Err("SYS_WRITE_MARK deveria retornar 0");
+    }
+    if crate::syscall::LAST_MARK.load(Ordering::SeqCst) != 0xCAFE {
+        return Err("SYS_WRITE_MARK nao registrou o argumento");
     }
     Ok(())
 }

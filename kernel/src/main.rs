@@ -12,6 +12,7 @@ mod panic;
 mod qemu;
 mod sched;
 mod serial;
+mod syscall;
 mod trap;
 
 use limine::BaseRevision;
@@ -78,6 +79,7 @@ unsafe extern "C" fn kmain() -> ! {
         arch_x86_64::lapic::TIMER_VECTOR
     );
 
+    syscall::init();
     kprintln!("TukOS pronto");
 
     #[cfg(feature = "ktest")]
