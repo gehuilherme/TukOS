@@ -12,7 +12,38 @@ const TESTS: &[(&str, TestFn)] = &[
     ("idt_loaded", idt_loaded),
     ("breakpoint_returns", breakpoint_returns),
     ("fbcon_draws_glyph", fbcon_draws_glyph),
+    ("frame_alloc_roundtrip", frame_alloc_roundtrip),
 ];
+
+fn frame_alloc_roundtrip() -> Result<(), &'static str> {
+    let before = crate::mem::frames::free_frame_count();
+    if before == 0 {
+        return Err("nenhum frame livre apos init");
+    }
+    let hhdm = crate::mem::frames::hhdm_offset();
+    let f1 = crate::mem::frames::alloc_frame().ok_or("alloc_frame devolveu None")?;
+    let f2 = crate::mem::frames::alloc_frame().ok_or("alloc_frame devolveu None")?;
+    if f1 == f2 {
+        return Err("alloc_frame devolveu o mesmo frame duas vezes");
+    }
+    if f1 % crate::mem::frames::FRAME_SIZE != 0 || f2 % crate::mem::frames::FRAME_SIZE != 0 {
+        return Err("frame nao alinhado a 4096");
+    }
+    // The frame must be writable through the HHDM.
+    let ptr = (f1 + hhdm) as *mut u64;
+    unsafe {
+        core::ptr::write_volatile(ptr, 0xA5A5_A5A5_DEAD_BEEF);
+        if core::ptr::read_volatile(ptr) != 0xA5A5_A5A5_DEAD_BEEF {
+            return Err("frame nao e gravavel via HHDM");
+        }
+    }
+    crate::mem::frames::free_frame(f1);
+    crate::mem::frames::free_frame(f2);
+    if crate::mem::frames::free_frame_count() != before {
+        return Err("contagem de frames livres nao voltou ao valor inicial");
+    }
+    Ok(())
+}
 
 fn gdt_selectors_loaded() -> Result<(), &'static str> {
     use arch_x86_64::{cpu, gdt};
