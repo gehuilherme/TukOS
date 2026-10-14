@@ -356,6 +356,7 @@ dependencies = [
  "limine",
  "mm",
  "noto-sans-mono-bitmap",
+ "pe",
  "spin",
 ]
 
