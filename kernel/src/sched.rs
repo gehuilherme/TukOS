@@ -38,6 +38,8 @@ struct Thread {
     teb_va: u64,
     /// Handle table of a user process; None for kernel threads.
     handle_table: Option<HandleTable>,
+    /// x87/SSE state, swapped with fxsave/fxrstor on every context switch.
+    fpu: Box<arch_x86_64::cpu::FxArea>,
 }
 
 struct Scheduler {
@@ -64,6 +66,7 @@ pub fn init() {
         space: None,
         teb_va: 0,
         handle_table: None,
+        fpu: Box::default(),
     };
     let mut threads = Vec::with_capacity(MAX_THREADS);
     threads.push(boot);
@@ -121,6 +124,7 @@ pub fn spawn(entry: fn()) -> usize {
         space: None,
         teb_va: 0,
         handle_table: None,
+        fpu: Box::default(),
     });
     s.threads.len() - 1
 }
@@ -171,6 +175,7 @@ pub fn spawn_user(
         space: Some(space),
         teb_va,
         handle_table: Some(handles),
+        fpu: Box::default(),
     });
     s.threads.len() - 1
 }
@@ -178,7 +183,7 @@ pub fn spawn_user(
 /// Switches to the next thread. The scheduler guard is dropped before the
 /// switch so the resumed thread can take the lock; interrupts must be disabled.
 fn switch_to_next() {
-    let (save, load, target_cr3, target_kstack_top, target_teb_va) = {
+    let (save, load, target_cr3, target_kstack_top, target_teb_va, fpu_save, fpu_load) = {
         let mut guard = SCHED.lock();
         let Some(s) = guard.as_mut() else { return };
         if s.threads.len() < 2 {
@@ -202,6 +207,8 @@ fn switch_to_next() {
             s.threads[to].cr3,
             s.threads[to].kstack_top,
             s.threads[to].teb_va,
+            &mut *s.threads[from].fpu as *mut arch_x86_64::cpu::FxArea,
+            &*s.threads[to].fpu as *const arch_x86_64::cpu::FxArea,
         )
     };
     unsafe {
@@ -230,7 +237,13 @@ fn switch_to_next() {
             arch_x86_64::cpu::write_cr3(target_root);
         }
     }
-    unsafe { arch_x86_64::context::switch_context(save, load) };
+    unsafe {
+        // Save the outgoing thread's x87/SSE state (the kernel is soft-float, so
+        // XMM still holds the user state) and install the incoming thread's.
+        arch_x86_64::cpu::fxsave(fpu_save);
+        arch_x86_64::cpu::fxrstor(fpu_load);
+        arch_x86_64::context::switch_context(save, load);
+    }
     reap_pending();
 }
 

@@ -9,6 +9,62 @@ pub struct DescriptorTablePointer {
     pub base: u64,
 }
 
+/// 512-byte, 16-byte-aligned FXSAVE area.
+#[repr(C, align(16))]
+pub struct FxArea(pub [u8; 512]);
+
+impl FxArea {
+    /// Power-on x87/SSE state: FCW = 0x37F, MXCSR = 0x1F80, registers zero.
+    pub fn new() -> Self {
+        let mut a = [0u8; 512];
+        a[0..2].copy_from_slice(&0x037Fu16.to_le_bytes());
+        a[24..28].copy_from_slice(&0x1F80u32.to_le_bytes());
+        FxArea(a)
+    }
+}
+
+impl Default for FxArea {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Enables SSE for Ring 3 code: CR0.EM = 0, CR0.MP = 1, CR4.OSFXSR = 1,
+/// CR4.OSXMMEXCPT = 1. The kernel itself is soft-float and never touches XMM;
+/// the scheduler saves/restores the state per thread with `fxsave`/`fxrstor`.
+///
+/// # Safety
+/// Ring 0 only; call once per CPU before any user code runs.
+pub unsafe fn enable_sse() {
+    unsafe {
+        asm!(
+            "mov rax, cr0",
+            "and rax, -5",
+            "or rax, 2",
+            "mov cr0, rax",
+            "mov rax, cr4",
+            "or rax, 0x600",
+            "mov cr4, rax",
+            out("rax") _,
+            options(nostack)
+        );
+    }
+}
+
+/// # Safety
+/// SSE must be enabled (`enable_sse`); `area` is valid for writes.
+#[inline]
+pub unsafe fn fxsave(area: *mut FxArea) {
+    unsafe { asm!("fxsave [{}]", in(reg) area, options(nostack, preserves_flags)) };
+}
+
+/// # Safety
+/// SSE must be enabled; `area` holds a valid FXSAVE image.
+#[inline]
+pub unsafe fn fxrstor(area: *const FxArea) {
+    unsafe { asm!("fxrstor [{}]", in(reg) area, options(nostack, preserves_flags)) };
+}
+
 #[inline]
 pub fn hlt() {
     unsafe { asm!("hlt", options(nostack, preserves_flags)) };

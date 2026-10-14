@@ -72,6 +72,10 @@ const TESTS: &[(&str, TestFn)] = &[
     ("ntwritefile_fills_iosb", ntwritefile_fills_iosb),
     ("ntwritefile_bad_handle", ntwritefile_bad_handle),
     ("exe_imports_ntdll_and_runs", exe_imports_ntdll_and_runs),
+    (
+        "usermode_loader_rejects_bad_iat",
+        usermode_loader_rejects_bad_iat,
+    ),
     ("peb_ldr_list_well_formed", peb_ldr_list_well_formed),
     ("two_user_processes_preempt", two_user_processes_preempt),
     ("reloc_dir64_crosses_page", reloc_dir64_crosses_page),
@@ -906,6 +910,9 @@ fn exe_imports_ntdll_and_runs() -> Result<(), &'static str> {
     if crate::ntdll_image::NTDLL_BYTES.is_empty() {
         return Ok(()); // ntdll not embedded on this host: skip.
     }
+    if !crate::process::ntdll_has_thunk() {
+        return Err("ntdll sem LdrInitializeThunk: caminho de modo usuario ausente");
+    }
     crate::syscall::LAST_WRITE_LEN.store(0, Ordering::SeqCst);
     let before = crate::mem::frames::free_frame_count();
     crate::process::spawn_exe_with_ntdll();
@@ -921,6 +928,40 @@ fn exe_imports_ntdll_and_runs() -> Result<(), &'static str> {
         }
     }
     Err("o .exe que importa ntdll nao rodou/saiu")
+}
+
+/// Sentinel the user-mode loader passes to NtTerminateProcess for a bad IAT slot
+/// (must match crates/ntdll `ST_BAD_IAT`).
+const LDR_ST_BAD_IAT: u64 = 0xC000_7006;
+
+fn usermode_loader_rejects_bad_iat() -> Result<(), &'static str> {
+    use core::sync::atomic::Ordering;
+    if crate::ntdll_image::NTDLL_BYTES.is_empty() {
+        return Ok(()); // ntdll not embedded on this host: skip.
+    }
+    if !crate::process::ntdll_has_thunk() {
+        return Err("ntdll sem LdrInitializeThunk: nada para rejeitar o IAT ruim");
+    }
+    crate::syscall::LAST_WRITE_LEN.store(0, Ordering::SeqCst);
+    crate::syscall::LAST_TERMINATE_STATUS.store(u64::MAX, Ordering::SeqCst);
+    let before = crate::mem::frames::free_frame_count();
+    crate::process::spawn_exe_image_with_ntdll(crate::process::build_exe_with_bad_iat());
+    for _ in 0..12000 {
+        crate::sched::yield_now();
+        let st = crate::syscall::LAST_TERMINATE_STATUS.load(Ordering::SeqCst);
+        if st != u64::MAX {
+            if st != LDR_ST_BAD_IAT {
+                return Err("o loader terminou com status inesperado");
+            }
+            if crate::syscall::LAST_WRITE_LEN.load(Ordering::SeqCst) != 0 {
+                return Err("o .exe com IAT ruim executou (escreveu)");
+            }
+            if crate::mem::frames::free_frame_count() == before {
+                return Ok(());
+            }
+        }
+    }
+    Err("IAT ruim: processo nao foi recusado/recolhido")
 }
 
 fn peb_ldr_list_well_formed() -> Result<(), &'static str> {

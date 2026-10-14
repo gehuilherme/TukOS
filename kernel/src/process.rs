@@ -461,6 +461,17 @@ fn spawn_pe_inner(image: &[u8], load_base: u64) -> (usize, u64) {
 /// (slot0 NtWriteFile @0x60, slot1 NtTerminateProcess @0x68), "ntdll.dll" 0x80,
 /// hint/name entries 0x90 and 0xA0, msg 0xC0 and IO_STATUS_BLOCK 0xD0.
 pub fn build_exe_importing_ntdll() -> alloc::vec::Vec<u8> {
+    build_exe_importing_ntdll_inner(false)
+}
+
+/// Like `build_exe_importing_ntdll`, but the first import's IAT slot (FirstThunk)
+/// points INTO the read+execute `.text` section: a malicious/corrupt exe that tries
+/// to make the loader write into code. The user-mode loader must refuse it.
+pub fn build_exe_with_bad_iat() -> alloc::vec::Vec<u8> {
+    build_exe_importing_ntdll_inner(true)
+}
+
+fn build_exe_importing_ntdll_inner(bad_iat: bool) -> alloc::vec::Vec<u8> {
     const OPT_SIZE: usize = 112 + 16 * 8;
     const TEXT_RVA: u32 = 0x1000;
     const DATA_RVA: u32 = 0x2000;
@@ -499,7 +510,9 @@ pub fn build_exe_importing_ntdll() -> alloc::vec::Vec<u8> {
     let mut d = alloc::vec![0u8; 0xE0];
     put(&mut d, 0, &(DATA_RVA + 0x40).to_le_bytes()); // OriginalFirstThunk
     put(&mut d, 12, &(DATA_RVA + 0x80).to_le_bytes()); // Name
-    put(&mut d, 16, &(DATA_RVA + 0x60).to_le_bytes()); // FirstThunk
+    // FirstThunk: the real IAT, or (bad_iat) the start of the code section.
+    let first_thunk = if bad_iat { TEXT_RVA } else { DATA_RVA + 0x60 };
+    put(&mut d, 16, &first_thunk.to_le_bytes());
     for base in [0x40usize, 0x60] {
         put(&mut d, base, &u64::from(DATA_RVA + 0x90).to_le_bytes());
         put(&mut d, base + 8, &u64::from(DATA_RVA + 0xA0).to_le_bytes());
@@ -523,6 +536,7 @@ pub fn build_exe_importing_ntdll() -> alloc::vec::Vec<u8> {
     put(&mut v, opt + 16, &TEXT_RVA.to_le_bytes());
     put(&mut v, opt + 24, &PE_IMAGE_BASE.to_le_bytes());
     put(&mut v, opt + 56, &0x3000u32.to_le_bytes());
+    put(&mut v, opt + 60, &(PE_RAW_OFF as u32).to_le_bytes()); // SizeOfHeaders
     put(&mut v, opt + 108, &16u32.to_le_bytes());
     put(&mut v, opt + 112 + 8, &DATA_RVA.to_le_bytes()); // import dir
     put(&mut v, opt + 112 + 12, &0x28u32.to_le_bytes());
@@ -566,8 +580,12 @@ pub const NTDLL_BASE: u64 = NTDLL_LOAD_BASE;
 /// the ntdll image: guard, stack, guard, TEB, PEB, ldr page.
 /// Requires the ntdll to be embedded.
 pub fn build_exe_ntdll_space() -> ExeSpace {
+    build_exe_ntdll_space_with(build_exe_importing_ntdll())
+}
+
+/// Same as `build_exe_ntdll_space` for an arbitrary test `.exe`.
+pub fn build_exe_ntdll_space_with(exe: alloc::vec::Vec<u8>) -> ExeSpace {
     let nt = crate::ntdll_image::NTDLL_BYTES;
-    let exe = build_exe_importing_ntdll();
     let space = AddressSpace::new_user();
     let exe_entry = crate::loader::load_pe(&space, &exe, PE_IMAGE_BASE).expect("load exe");
     let ntdll_entry = crate::loader::load_pe(&space, nt, NTDLL_LOAD_BASE).expect("load ntdll");
@@ -634,11 +652,24 @@ pub fn build_exe_ntdll_space() -> ExeSpace {
 /// The thread starts at ntdll's `LdrInitializeThunk`, which walks `PEB->Ldr`.
 /// Does nothing when the ntdll is not embedded.
 pub fn spawn_exe_with_ntdll() {
+    spawn_exe_image_with_ntdll(build_exe_importing_ntdll());
+}
+
+/// True when the embedded ntdll exports `LdrInitializeThunk`.
+pub fn ntdll_has_thunk() -> bool {
+    pe::PeFile::parse(crate::ntdll_image::NTDLL_BYTES)
+        .ok()
+        .and_then(|p| p.export_rva_by_name("LdrInitializeThunk"))
+        .is_some()
+}
+
+/// Starts `exe` (loaded with the embedded ntdll) on a new user thread.
+pub fn spawn_exe_image_with_ntdll(exe: alloc::vec::Vec<u8>) {
     let nt = crate::ntdll_image::NTDLL_BYTES;
     if nt.is_empty() {
         return;
     }
-    let es = build_exe_ntdll_space();
+    let es = build_exe_ntdll_space_with(exe);
     let thunk = pe::PeFile::parse(nt)
         .ok()
         .and_then(|p| p.export_rva_by_name("LdrInitializeThunk"));

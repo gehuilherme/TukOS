@@ -75,6 +75,27 @@ pub fn load_pe(space: &AddressSpace, image: &[u8], load_base: u64) -> Result<u64
     let pe = PeFile::parse(image).map_err(LoadError::Parse)?;
     let delta = load_base.wrapping_sub(pe.image_base());
 
+    // Map the PE headers read-only + NX at the image base, as Windows does, so a
+    // user-mode loader (ntdll!LdrInitializeThunk) can parse the loaded image.
+    let hdr = (pe.size_of_headers() as usize).min(image.len());
+    if hdr != 0 {
+        let pages = (hdr as u64).div_ceil(PAGE);
+        for p in 0..pages {
+            let frame = alloc_frame().ok_or(LoadError::Alloc)?;
+            let dst = phys_to_virt(frame) as *mut u8;
+            let off = (p * PAGE) as usize;
+            let n = core::cmp::min(PAGE as usize, hdr - off);
+            unsafe {
+                core::ptr::write_bytes(dst, 0, PAGE as usize);
+                core::ptr::copy_nonoverlapping(image.as_ptr().add(off), dst, n);
+                let va = load_base.checked_add(p * PAGE).ok_or(LoadError::Overflow)?;
+                space
+                    .map(va, frame, PageFlags::USER.union(PageFlags::NO_EXECUTE))
+                    .map_err(|_| LoadError::Map)?;
+            }
+        }
+    }
+
     for sec in pe.sections() {
         let (writable, exec) = characteristics_to_flags(sec.characteristics);
         let mut flags = PageFlags::USER;

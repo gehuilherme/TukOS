@@ -158,6 +158,9 @@ pub struct PeFile<'a> {
     num_sections: usize,
     reloc_dir_rva: u32,
     reloc_dir_size: u32,
+    /// True when `bytes` is a memory image (each section at its RVA from the
+    /// module base) instead of the raw file: RVA -> offset is then the identity.
+    loaded: bool,
 }
 
 fn rd_u16(b: &[u8], off: usize) -> Option<u16> {
@@ -178,7 +181,21 @@ fn rd_u64(b: &[u8], off: usize) -> Option<u64> {
 }
 
 impl<'a> PeFile<'a> {
+    /// Parses a raw PE file (sections at their `PointerToRawData`).
     pub fn parse(bytes: &'a [u8]) -> Result<PeFile<'a>, PeError> {
+        Self::parse_impl(bytes, false)
+    }
+
+    /// Parses a LOADED image: `image` is the module's memory (headers at offset 0,
+    /// each section at its RVA). Only bytes covered by a section (or the headers)
+    /// are ever dereferenced, so unmapped gaps between sections are never touched.
+    /// All accessors (`imports`, `exports`, `resolve_export`, ...) then work over
+    /// the in-memory image; this is what the user-mode loader (ntdll) uses.
+    pub fn parse_loaded(image: &'a [u8]) -> Result<PeFile<'a>, PeError> {
+        Self::parse_impl(image, true)
+    }
+
+    fn parse_impl(bytes: &'a [u8], loaded: bool) -> Result<PeFile<'a>, PeError> {
         if bytes.len() < 0x40 {
             return Err(PeError::TooSmall);
         }
@@ -237,7 +254,13 @@ impl<'a> PeFile<'a> {
             num_sections,
             reloc_dir_rva,
             reloc_dir_size,
+            loaded,
         })
+    }
+
+    /// `SizeOfHeaders` from the optional header.
+    pub fn size_of_headers(&self) -> u32 {
+        rd_u32(self.bytes, self.opt_header_off + 60).unwrap_or(0)
     }
 
     pub fn entry_point_rva(&self) -> u32 {
@@ -262,10 +285,18 @@ impl<'a> PeFile<'a> {
         let raw_size = rd_u32(self.bytes, h + 16)? as usize;
         let raw_ptr = rd_u32(self.bytes, h + 20)? as usize;
         let characteristics = rd_u32(self.bytes, h + 36)?;
-        let raw = raw_ptr
-            .checked_add(raw_size)
-            .and_then(|end| self.bytes.get(raw_ptr..end))
-            .unwrap_or(&[]);
+        let raw = if self.loaded {
+            // In a loaded image the section's bytes live at its RVA.
+            (rva as usize)
+                .checked_add(virtual_size as usize)
+                .and_then(|end| self.bytes.get(rva as usize..end))
+                .unwrap_or(&[])
+        } else {
+            raw_ptr
+                .checked_add(raw_size)
+                .and_then(|end| self.bytes.get(raw_ptr..end))
+                .unwrap_or(&[])
+        };
         Some(Section {
             rva,
             virtual_size,
@@ -310,6 +341,19 @@ impl<'a> PeFile<'a> {
             let va = rd_u32(self.bytes, h + 12)?;
             let raw_size = rd_u32(self.bytes, h + 16)?;
             let raw_ptr = rd_u32(self.bytes, h + 20)? as usize;
+            if self.loaded {
+                // Identity mapping, restricted to the section's virtual extent
+                // and to the image slice.
+                let extent = if vsize == 0 { raw_size } else { vsize };
+                if rva < va || rva - va >= extent {
+                    continue;
+                }
+                let end = (va as usize).checked_add(extent as usize)?;
+                if end > self.bytes.len() {
+                    return None;
+                }
+                return Some((rva as usize, end));
+            }
             // Treat a zero VirtualSize as "use the raw size".
             let extent = if vsize == 0 { raw_size } else { vsize };
             if rva < va || rva - va >= extent || rva - va >= raw_size {
@@ -951,6 +995,87 @@ mod tests {
                 let f = PeFile::parse(&m).unwrap();
                 for o in [0u16, 1, 5, 6, 7, 8, u16::MAX] {
                     let _ = f.export_rva_by_ordinal(o);
+                }
+            }
+        }
+    }
+
+    /// Turns a raw-file PE built by `build_pe*` (one section at RVA 0x1000) into the
+    /// LOADED image: headers at 0, the section's bytes at their RVA, zero padding up
+    /// to SizeOfImage-ish. The raw-data pointer is poisoned to prove it is not used.
+    fn to_loaded(pe: &[u8]) -> Vec<u8> {
+        let mut img = vec![0u8; 0x1000 + (pe.len() - RAW_OFF) + 0x100];
+        img[..RAW_OFF].copy_from_slice(&pe[..RAW_OFF]);
+        img[0x1000..0x1000 + pe.len() - RAW_OFF].copy_from_slice(&pe[RAW_OFF..]);
+        img[SEC_OFF + 20..SEC_OFF + 24].copy_from_slice(&0x7777_0000u32.to_le_bytes());
+        img
+    }
+
+    #[test]
+    fn parse_loaded_resolves_imports_and_exports() {
+        let img = to_loaded(&build_pe_with_imports());
+        let f = PeFile::parse_loaded(&img).unwrap();
+        let dlls: Vec<_> = f.imports().unwrap().collect();
+        assert_eq!(dlls.len(), 1);
+        assert_eq!(dlls[0].name, "OTHER.DLL");
+        let e: Vec<_> = dlls[0].thunks.collect();
+        assert_eq!(e.len(), 2);
+        assert_eq!(e[0].iat_rva, 0x1060);
+        assert_eq!(
+            e[0].kind,
+            ImportKind::Name {
+                hint: 5,
+                name: "Foo"
+            }
+        );
+        assert_eq!(e[1].kind, ImportKind::Ordinal(7));
+
+        let img = to_loaded(&build_pe_with_ordinal_exports());
+        let f = PeFile::parse_loaded(&img).unwrap();
+        assert_eq!(f.export_rva_by_name("Bar"), Some(0x1234));
+        assert_eq!(f.export_rva_by_ordinal(7), Some(0x1300));
+        assert_eq!(f.export_rva_by_ordinal(6), None);
+        assert_eq!(f.exports().unwrap().count(), 1);
+        // Identity RVA -> offset, bounded by the section and the image.
+        assert_eq!(f.rva_to_offset(0x1010), Some(0x1010));
+        assert_eq!(f.rva_to_offset(0x0FFF), None); // header gap, not a section
+        assert_eq!(f.rva_to_offset(0x1080), None); // past the section's virtual size
+        // Sections expose the in-memory bytes.
+        let s = f.sections().next().unwrap();
+        assert_eq!(s.raw.len(), 0x80);
+    }
+
+    #[test]
+    fn parse_loaded_is_bounded_by_the_image_slice() {
+        let img = to_loaded(&build_pe_with_exports());
+        // Truncated image: the section runs past the slice -> lookups fail cleanly.
+        let f = PeFile::parse_loaded(&img[..0x1040]).unwrap();
+        assert_eq!(f.rva_to_offset(0x1010), None);
+        assert_eq!(f.export_rva_by_name("Bar"), None);
+        // The file parser still treats the same bytes by PointerToRawData.
+        let raw = build_pe_with_exports();
+        assert_eq!(
+            PeFile::parse(&raw).unwrap().rva_to_offset(0x1010),
+            Some(RAW_OFF + 0x10)
+        );
+    }
+
+    #[test]
+    fn parse_loaded_never_panics_on_corruption() {
+        let img = to_loaded(&build_pe_with_imports());
+        for pos in 0..img.len() {
+            for val in [0x00u8, 0xFF, 0x80] {
+                let mut m = img.clone();
+                m[pos] = val;
+                if let Ok(f) = PeFile::parse_loaded(&m) {
+                    if let Ok(it) = f.imports() {
+                        for d in it {
+                            let _ = d.thunks.count();
+                        }
+                    }
+                    let _ = f.exports().map(|i| i.count());
+                    let _ = f.export_rva_by_ordinal(7);
+                    let _ = f.sections().count();
                 }
             }
         }

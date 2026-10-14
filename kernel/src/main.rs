@@ -61,6 +61,9 @@ static mut PERCPU: arch_x86_64::percpu::PerCpu = arch_x86_64::percpu::PerCpu::ne
 #[unsafe(no_mangle)]
 unsafe extern "C" fn kmain() -> ! {
     serial::init();
+    // Ring 3 code may use SSE (e.g. the Rust-built ntdll); the scheduler
+    // saves/restores the per-thread state.
+    unsafe { arch_x86_64::cpu::enable_sse() };
     // Install the trap machinery first so no early exception is silent.
     arch_x86_64::trap::set_handler(trap::handle);
     unsafe {
