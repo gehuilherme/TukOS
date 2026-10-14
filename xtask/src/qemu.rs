@@ -23,6 +23,11 @@ pub fn outcome_from_exit_code(code: Option<i32>) -> Outcome {
     }
 }
 
+/// Whether QEMU should run without a window.
+pub fn headless(ci: Option<&str>, tukos_headless: Option<&str>) -> bool {
+    ci.is_some_and(|v| !v.is_empty()) || tukos_headless == Some("1")
+}
+
 pub fn first_existing(candidates: &[PathBuf]) -> Option<PathBuf> {
     candidates.iter().find(|p| p.is_file()).cloned()
 }
@@ -133,9 +138,17 @@ pub fn run_interactive(esp: &Path) -> crate::Result<()> {
 pub fn run_captured(esp: &Path, timeout: Duration) -> crate::Result<(Outcome, String)> {
     let qemu = find_qemu()?;
     let ovmf = find_ovmf(&qemu)?;
+    let ci = std::env::var("CI").ok();
+    let forced = std::env::var("TUKOS_HEADLESS").ok();
+    let display_args: &[&str] = if headless(ci.as_deref(), forced.as_deref()) {
+        &["-display", "none"]
+    } else {
+        &[]
+    };
     let mut child = Command::new(&qemu)
         .args(base_args(&ovmf, esp))
-        .args(["-display", "none", "-monitor", "none"])
+        .args(["-monitor", "none"])
+        .args(display_args)
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit())
         .spawn()
@@ -171,6 +184,15 @@ mod tests {
             c.arg(secs.to_string());
             c
         }
+    }
+
+    #[test]
+    fn headless_only_in_ci_or_when_requested() {
+        assert!(!headless(None, None));
+        assert!(headless(Some("true"), None));
+        assert!(!headless(Some(""), None));
+        assert!(headless(None, Some("1")));
+        assert!(!headless(None, Some("0")));
     }
 
     #[test]

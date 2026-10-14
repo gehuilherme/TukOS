@@ -21,7 +21,7 @@ Sistema operacional escrito do zero em Rust, com o objetivo de rodar aplicativos
 | `cargo xtask ktest` | roda os autotestes do kernel no QEMU |
 | `cargo xtask test` | roda os testes unitários no host |
 
-Variáveis opcionais: `TUKOS_QEMU` (caminho do `qemu-system-x86_64`) e `TUKOS_OVMF` (caminho do firmware OVMF).
+Variáveis opcionais: `TUKOS_QEMU` (caminho do `qemu-system-x86_64`) e `TUKOS_OVMF` (caminho do firmware OVMF). `TUKOS_HEADLESS=1` roda o QEMU sem janela; a CI já roda sem janela via `CI`.
 
 ## Licença
 
