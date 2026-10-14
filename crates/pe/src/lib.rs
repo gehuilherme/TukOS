@@ -1,6 +1,6 @@
-//! Parser de PE/COFF (PE32+) — logica pura, sem alocacao.
+//! PE/COFF (PE32+) parser: pure logic, no allocation.
 //!
-//! Offsets e constantes vem da especificacao publica "PE Format" (clean room).
+//! Offsets and constants come from the public "PE Format" specification (clean room).
 #![cfg_attr(not(test), no_std)]
 
 pub const SCN_MEM_EXECUTE: u32 = 0x2000_0000;
@@ -34,6 +34,9 @@ pub enum PeError {
 pub struct Section<'a> {
     pub rva: u32,
     pub virtual_size: u32,
+    /// The section's raw bytes as they appear in the file. May be longer than
+    /// `virtual_size` (file-alignment padding) or empty (no raw data, e.g. .bss);
+    /// consumers must bound their use to `virtual_size`.
     pub raw: &'a [u8],
     pub characteristics: u32,
 }
@@ -80,7 +83,7 @@ impl<'a> PeFile<'a> {
             return Err(PeError::BadDosMagic);
         }
         let lfanew = rd_u32(bytes, 0x3C).ok_or(PeError::TooSmall)? as usize;
-        // Signature (4) + COFF (20) precisam caber.
+        // Signature (4) + COFF (20) must fit.
         if lfanew
             .checked_add(4 + COFF_SIZE)
             .is_none_or(|end| end > bytes.len())
@@ -175,7 +178,7 @@ impl<'a> PeFile<'a> {
 
     pub fn relocations(&self) -> Result<impl Iterator<Item = Reloc> + use<'a>, PeError> {
         let data = self.reloc_dir_data()?;
-        // Validacao previa de todos os blocos; o iterador assume dados validos.
+        // All blocks are validated up front; the iterator assumes valid data.
         let mut pos = 0usize;
         while pos < data.len() {
             let size = rd_u32(data, pos + 4).ok_or(PeError::BadRelocBlock)? as usize;
@@ -231,7 +234,7 @@ impl Iterator for RelocIter<'_> {
                     kind: e >> 12,
                 });
             }
-            // Proximo bloco (comeca onde o anterior terminou).
+            // Next block (starts where the previous one ended).
             let start = self.block_end;
             if start + 8 > self.data.len() {
                 return None;
@@ -248,7 +251,7 @@ pub const fn characteristics_to_flags(ch: u32) -> (bool, bool) {
     (ch & SCN_MEM_WRITE != 0, ch & SCN_MEM_EXECUTE != 0)
 }
 
-/// Soma `delta` ao `u64` em `bytes[rva..rva+8]`. Fora dos limites: no-op.
+/// Adds `delta` to the `u64` at `bytes[rva..rva+8]`. Out of bounds: no-op.
 pub fn apply_dir64(bytes: &mut [u8], rva: u32, delta: i64) {
     let off = rva as usize;
     let Some(end) = off.checked_add(8) else {
@@ -352,7 +355,7 @@ mod tests {
         assert_eq!(u64::from_le_bytes(buf[8..16].try_into().unwrap()), 0x6000);
         apply_dir64(&mut buf, 8, -0x1000);
         assert_eq!(u64::from_le_bytes(buf[8..16].try_into().unwrap()), 0x5000);
-        apply_dir64(&mut buf, 12, 1); // fora dos limites: no-op
+        apply_dir64(&mut buf, 12, 1); // out of bounds: no-op
     }
 
     #[test]
@@ -382,9 +385,9 @@ mod tests {
         pe[0x59] = 0x01;
         assert_eq!(PeFile::parse(&pe).err(), Some(PeError::NotPe32Plus));
         let mut pe = good.clone();
-        pe[0x46] = 0xFF; // NumberOfSections enorme
+        pe[0x46] = 0xFF; // huge NumberOfSections
         assert_eq!(PeFile::parse(&pe).err(), Some(PeError::SectionOutOfBounds));
-        // Truncamentos nunca entram em panico.
+        // Truncations never panic.
         for n in 0..good.len() {
             let _ = PeFile::parse(&good[..n]).map(|f| f.sections().count());
         }
@@ -400,7 +403,7 @@ mod tests {
 
     #[test]
     fn relocations_are_iterated() {
-        // Um bloco de 16 bytes: page 0x1000, 4 entradas (2 DIR64 + 2 ABSOLUTE de padding).
+        // One 16-byte block: page 0x1000, 4 entries (2 DIR64 + 2 ABSOLUTE padding).
         let mut blk = Vec::new();
         blk.extend_from_slice(&0x1000u32.to_le_bytes());
         blk.extend_from_slice(&16u32.to_le_bytes());
@@ -430,7 +433,7 @@ mod tests {
             }
         );
         assert_eq!(r[2].kind, REL_BASED_ABSOLUTE);
-        // Bloco corrompido (BlockSize 4).
+        // Corrupted block (BlockSize 4).
         pe[RAW_OFF + 4..RAW_OFF + 8].copy_from_slice(&4u32.to_le_bytes());
         let f = PeFile::parse(&pe).unwrap();
         assert!(matches!(f.relocations(), Err(PeError::BadRelocBlock)));

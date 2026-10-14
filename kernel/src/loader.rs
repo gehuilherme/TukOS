@@ -43,8 +43,13 @@ pub fn load_pe(space: &AddressSpace, image: &[u8], load_base: u64) -> Result<u64
             unsafe {
                 core::ptr::write_bytes(dst, 0, PAGE as usize);
                 let off = (p * PAGE) as usize;
-                if off < sec.raw.len() {
-                    let n = core::cmp::min(PAGE as usize, sec.raw.len() - off);
+                let vsize = sec.virtual_size as usize;
+                if off < sec.raw.len() && off < vsize {
+                    // Never copy file-alignment padding beyond virtual_size.
+                    let n = core::cmp::min(
+                        PAGE as usize,
+                        core::cmp::min(sec.raw.len() - off, vsize - off),
+                    );
                     core::ptr::copy_nonoverlapping(sec.raw.as_ptr().add(off), dst, n);
                 }
                 space
