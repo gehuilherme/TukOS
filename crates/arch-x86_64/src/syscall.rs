@@ -69,6 +69,7 @@ tukos_syscall_entry:
     swapgs
     mov gs:[{off_user_rsp}], rsp
     mov rsp, gs:[{off_kernel_rsp}]
+    and rsp, -16
     push rcx
     push r11
     mov r8,  r10
