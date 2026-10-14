@@ -707,3 +707,86 @@ pub unsafe extern "system" fn RtlFreeHeap(heap: *mut u8, _flags: u32, ptr: *mut 
         0
     }
 }
+
+/// Address of the used block whose payload is `ptr`, if `ptr` is a plausible live
+/// block of the process heap (same checks as `RtlFreeHeap`).
+unsafe fn heap_locate(heap: *mut u8, ptr: *mut u8) -> Option<usize> {
+    unsafe {
+        let h = core::ptr::addr_of_mut!(PROCESS_HEAP);
+        if !core::ptr::eq(heap, h as *mut u8) || ptr.is_null() {
+            return None;
+        }
+        let p = ptr as usize;
+        if !p.is_multiple_of(16) {
+            return None;
+        }
+        let mut seg = (*h).segs;
+        while seg != 0 {
+            let seg_size = core::ptr::read((seg + 8) as *const usize);
+            let end = seg + seg_size - HDR;
+            if p >= seg + SEG_HDR + HDR && p < end {
+                let b = p - HDR;
+                return if blk_used(b) { Some(b) } else { None };
+            }
+            seg = core::ptr::read(seg as *const usize);
+        }
+        None
+    }
+}
+
+/// `RtlSizeHeap`: usable payload size of a live block (>= the size requested), or
+/// `(SIZE_T)-1` if `ptr` is not a live block of `heap`.
+///
+/// # Safety
+/// `ptr` must be null or a pointer returned by `RtlAllocateHeap` for `heap`.
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn RtlSizeHeap(heap: *mut u8, _flags: u32, ptr: *const u8) -> usize {
+    unsafe {
+        match heap_locate(heap, ptr as *mut u8) {
+            Some(b) => blk_size(b) - HDR,
+            None => usize::MAX,
+        }
+    }
+}
+
+const HEAP_REALLOC_IN_PLACE_ONLY: u32 = 0x10;
+
+/// `RtlReAllocateHeap`: resizes a live block, preserving `min(old, new)` bytes.
+/// New block = allocate + copy + free old (the old block is untouched on failure).
+/// `HEAP_ZERO_MEMORY` zero-fills only the bytes beyond the old contents;
+/// `HEAP_REALLOC_IN_PLACE_ONLY` succeeds only if the existing block already fits.
+/// Returns null on failure (including a null/foreign `ptr`).
+///
+/// # Safety
+/// `ptr` must be a live pointer returned by `RtlAllocateHeap` for `heap`.
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn RtlReAllocateHeap(
+    heap: *mut u8,
+    flags: u32,
+    ptr: *mut u8,
+    size: usize,
+) -> *mut u8 {
+    unsafe {
+        let Some(b) = heap_locate(heap, ptr) else {
+            return core::ptr::null_mut();
+        };
+        let old = blk_size(b) - HDR;
+        if size <= old {
+            // Fits: keep the block (shrinking in place just keeps the slack).
+            return ptr;
+        }
+        if flags & HEAP_REALLOC_IN_PLACE_ONLY != 0 {
+            return core::ptr::null_mut();
+        }
+        let np = RtlAllocateHeap(heap, 0, size);
+        if np.is_null() {
+            return core::ptr::null_mut();
+        }
+        memcpy(np, ptr, old);
+        if flags & HEAP_ZERO_MEMORY != 0 {
+            memset(np.add(old), 0, size - old);
+        }
+        RtlFreeHeap(heap, 0, ptr);
+        np
+    }
+}

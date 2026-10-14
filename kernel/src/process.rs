@@ -560,6 +560,8 @@ fn build_exe_importing_ntdll_inner(bad_iat: bool) -> alloc::vec::Vec<u8> {
 }
 
 const NTDLL_LOAD_BASE: u64 = 0x1000_0000;
+/// Extra stack pages (below the top page) of the multi-module process spaces.
+const STACK_EXTRA_PAGES: u64 = 15;
 
 /// A process space holding the test `.exe` + ntdll, with stack/TEB/PEB and
 /// `PEB->Ldr` built. The thread is not started yet.
@@ -634,18 +636,24 @@ fn build_space(exe: alloc::vec::Vec<u8>, with_k32: bool) -> ExeSpace {
         size: (nt_top - NTDLL_LOAD_BASE) as u32,
         name: "ntdll.dll",
     });
-    let stack_va = nt_top + 4096;
-    let stack_phys = crate::mem::frames::alloc_frame().expect("sem frame p/ pilha");
-    unsafe {
-        space
-            .map(
-                stack_va,
-                stack_phys,
-                PageFlags::USER
-                    .union(PageFlags::WRITABLE)
-                    .union(PageFlags::NO_EXECUTE),
-            )
-            .expect("map pilha");
+    // The initial stack is STACK_EXTRA_PAGES + 1 pages (the MSVC CRT startup needs more
+    // than one): the extra pages sit right below `stack_va` (the top page), and the
+    // unmapped page under them is the guard.
+    let stack_va = nt_top + 4096 + STACK_EXTRA_PAGES * 4096;
+    for i in 0..=STACK_EXTRA_PAGES {
+        let va = stack_va - (STACK_EXTRA_PAGES - i) * 4096;
+        let stack_phys = crate::mem::frames::alloc_frame().expect("sem frame p/ pilha");
+        unsafe {
+            space
+                .map(
+                    va,
+                    stack_phys,
+                    PageFlags::USER
+                        .union(PageFlags::WRITABLE)
+                        .union(PageFlags::NO_EXECUTE),
+                )
+                .expect("map pilha");
+        }
     }
     let teb_va = stack_va + 2 * 4096;
     let peb_va = stack_va + 3 * 4096;
@@ -657,7 +665,7 @@ fn build_space(exe: alloc::vec::Vec<u8>, with_k32: bool) -> ExeSpace {
         peb_va,
         PE_IMAGE_BASE,
         stack_va + 4096,
-        stack_va,
+        stack_va - STACK_EXTRA_PAGES * 4096,
     )
     .expect("teb setup");
     crate::teb::setup_ldr(&space, ldr_va, peb_va, &mods).expect("ldr setup");

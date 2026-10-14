@@ -112,6 +112,8 @@ const TESTS: &[(&str, TestFn)] = &[
     ("translate_user_rejects_huge", translate_user_rejects_huge),
     ("ntdll_embedded_parses", ntdll_embedded_parses),
     ("kernel32_embedded_parses", kernel32_embedded_parses),
+    ("kernel32_exports_crt_surface", kernel32_exports_crt_surface),
+    ("crt_hello_resolves_imports", crt_hello_resolves_imports),
     ("two_modules_no_overlap", two_modules_no_overlap),
     (
         "import_resolve_rejects_bad_iat_slot",
@@ -186,6 +188,144 @@ fn kernel32_embedded_parses() -> Result<(), &'static str> {
     if dlls != 1 {
         return Err("kernel32 deve ter exatamente 1 DLL importada");
     }
+    Ok(())
+}
+
+/// The 72 kernel32 imports of a `/MT` MSVC `hello.exe` (docs/observations/
+/// 2026-10-14-crt-imports-survey.md), plus the extra names Plan 13 exports.
+const CRT_SURFACE: &[&str] = &[
+    "QueryPerformanceCounter",
+    "GetCurrentProcessId",
+    "GetCurrentThreadId",
+    "GetSystemTimeAsFileTime",
+    "InitializeSListHead",
+    "RtlCaptureContext",
+    "RtlLookupFunctionEntry",
+    "RtlVirtualUnwind",
+    "IsDebuggerPresent",
+    "UnhandledExceptionFilter",
+    "SetUnhandledExceptionFilter",
+    "GetStartupInfoW",
+    "IsProcessorFeaturePresent",
+    "GetModuleHandleW",
+    "WriteConsoleW",
+    "RtlUnwindEx",
+    "GetLastError",
+    "SetLastError",
+    "EnterCriticalSection",
+    "LeaveCriticalSection",
+    "DeleteCriticalSection",
+    "InitializeCriticalSectionAndSpinCount",
+    "TlsAlloc",
+    "TlsGetValue",
+    "TlsSetValue",
+    "TlsFree",
+    "FreeLibrary",
+    "GetProcAddress",
+    "LoadLibraryExW",
+    "RaiseException",
+    "GetStdHandle",
+    "WriteFile",
+    "GetModuleFileNameW",
+    "GetCurrentProcess",
+    "ExitProcess",
+    "TerminateProcess",
+    "GetModuleHandleExW",
+    "GetCommandLineA",
+    "GetCommandLineW",
+    "HeapAlloc",
+    "HeapFree",
+    "CompareStringW",
+    "LCMapStringW",
+    "GetFileType",
+    "FindClose",
+    "FindFirstFileExW",
+    "FindNextFileW",
+    "IsValidCodePage",
+    "GetACP",
+    "GetOEMCP",
+    "GetCPInfo",
+    "MultiByteToWideChar",
+    "WideCharToMultiByte",
+    "GetEnvironmentStringsW",
+    "FreeEnvironmentStringsW",
+    "SetEnvironmentVariableW",
+    "SetStdHandle",
+    "GetStringTypeW",
+    "GetProcessHeap",
+    "FlushFileBuffers",
+    "GetConsoleOutputCP",
+    "GetConsoleMode",
+    "GetFileSizeEx",
+    "SetFilePointerEx",
+    "HeapSize",
+    "HeapReAlloc",
+    "CloseHandle",
+    "CreateFileW",
+    // extras
+    "QueryPerformanceFrequency",
+    "GetTickCount",
+    "GetTickCount64",
+    "GetModuleHandleA",
+    "GetModuleFileNameA",
+    "LoadLibraryW",
+    "InitializeCriticalSection",
+    "InitializeCriticalSectionEx",
+    "FlsAlloc",
+    "FlsGetValue",
+    "FlsSetValue",
+    "FlsFree",
+];
+
+fn kernel32_exports_crt_surface() -> Result<(), &'static str> {
+    let bytes = crate::kernel32_image::KERNEL32_BYTES;
+    if bytes.is_empty() {
+        return Ok(()); // kernel32 not embedded on this host (no MSVC): skip.
+    }
+    let pe = pe::PeFile::parse(bytes).map_err(|_| "kernel32.dll embutido nao e PE valido")?;
+    for name in CRT_SURFACE {
+        if pe.export_rva_by_name(name).is_none() {
+            crate::kprintln!("kernel32 nao exporta: {}", name);
+            return Err("kernel32 nao exporta um nome da superficie do CRT");
+        }
+    }
+    // Still only ntdll is imported.
+    let imports = pe.imports().map_err(|_| "imports ilegiveis")?;
+    for dll in imports {
+        if !dll.name.eq_ignore_ascii_case("ntdll.dll") {
+            return Err("kernel32 importa uma DLL que nao e ntdll.dll");
+        }
+    }
+    Ok(())
+}
+
+/// A real `/MT` MSVC `hello.exe` (target/conformance/crt/hello.exe; empty if not built).
+static CRT_HELLO_EXE: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/crt_hello.exe"));
+
+/// Boots the real CRT hello through the multi-module loader. Plan 13 Task 2: every
+/// import must resolve (no loader death: UNRESOLVED/NO_DEP/BAD_PE/BAD_IAT...), i.e.
+/// the exe gets into CRT startup. What happens after (stdio) is Task 3.
+fn crt_hello_resolves_imports() -> Result<(), &'static str> {
+    use core::sync::atomic::Ordering;
+    if !have_both_dlls() || CRT_HELLO_EXE.is_empty() {
+        return Ok(()); // dlls/hello.exe not embedded on this host: skip.
+    }
+    crate::syscall::LAST_TERMINATE_STATUS.store(u64::MAX, Ordering::SeqCst);
+    crate::process::spawn_exe_image_with_k32(CRT_HELLO_EXE.to_vec());
+    for _ in 0..40000 {
+        crate::sched::yield_now();
+        let st = crate::syscall::LAST_TERMINATE_STATUS.load(Ordering::SeqCst);
+        if st != u64::MAX {
+            // 0xC000_7001..=0xC000_700A are the user-mode loader's death sentinels.
+            if (0xC000_7001..=0xC000_700A).contains(&st) {
+                crate::kprintln!("loader status {:#x}", st);
+                return Err("crt hello: o loader morreu (import nao resolvido?)");
+            }
+            crate::kprintln!("crt hello terminou com status {:#x}", st);
+            return Ok(());
+        }
+    }
+    // Still running (no loader death within the budget) = past import binding.
     Ok(())
 }
 
@@ -915,6 +1055,12 @@ fn ntwritefile_prints_user_buffer() -> Result<(), &'static str> {
 }
 
 fn nt_terminate_exits_and_reaps() -> Result<(), &'static str> {
+    // Let processes left over from earlier tests finish being reaped first: otherwise
+    // their late frame release lands inside the window below and `before` is stale
+    // (depends on kernel image size/timing).
+    for _ in 0..4000 {
+        crate::sched::yield_now();
+    }
     let before = crate::mem::frames::free_frame_count();
     crate::process::spawn_nt_hello_pe(); // ends with NtTerminateProcess
     for _ in 0..8000 {
