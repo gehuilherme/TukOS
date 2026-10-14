@@ -108,7 +108,7 @@ pub fn base_args(ovmf: &Path, esp: &Path) -> Vec<String> {
         "-drive".into(),
         format!("if=pflash,format=raw,readonly=on,file={}", ovmf.display()),
         "-drive".into(),
-        format!("format=raw,file=fat:{}", esp.display()),
+        format!("format=raw,file=fat:rw:{}", esp.display()),
         "-serial".into(),
         "stdio".into(),
         "-device".into(),
@@ -220,7 +220,7 @@ mod tests {
         let args = base_args(Path::new("/fw/OVMF.fd"), Path::new("/esp"));
         let joined = args.join(" ");
         assert!(joined.contains("if=pflash,format=raw,readonly=on,file=/fw/OVMF.fd"));
-        assert!(joined.contains("format=raw,file=fat:/esp"));
+        assert!(joined.contains("format=raw,file=fat:rw:/esp"));
         assert!(joined.contains("-serial stdio"));
         assert!(joined.contains("isa-debug-exit,iobase=0xf4,iosize=0x04"));
         assert!(joined.contains("-no-reboot"));

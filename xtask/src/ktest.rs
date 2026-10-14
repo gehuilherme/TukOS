@@ -83,6 +83,29 @@ pub fn check_expected_panic(outcome: Outcome, report: &Report, must_contain: &[&
     Ok(())
 }
 
+use std::time::Duration;
+
+const TIMEOUT: Duration = Duration::from_secs(60);
+
+/// Boots each self-test kernel variant and checks its serial output.
+pub fn run_all() -> crate::Result<()> {
+    run_variant("ktest", check_ktest)?;
+    run_variant("ktest-panic", |o, r| check_expected_panic(o, r, &["ktest-panic deliberado"]))?;
+    println!("ktest: todas as variantes passaram");
+    Ok(())
+}
+
+fn run_variant(feature: &str, check: impl Fn(Outcome, &Report) -> crate::Result<()>) -> crate::Result<()> {
+    let esp = crate::image::build(&[feature])?;
+    let (outcome, serial) = crate::qemu::run_captured(&esp, TIMEOUT)?;
+    let report = parse(&serial);
+    check(outcome, &report).map_err(|e| format!("variante {feature}: {e}
+--- serial ---
+{serial}"))?;
+    println!("ktest: variante {feature} ok ({} teste(s))", report.passed.len());
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

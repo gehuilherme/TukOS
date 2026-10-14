@@ -1,0 +1,22 @@
+[package]
+name = "tukos-kernel"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[[bin]]
+name = "tukos-kernel"
+path = "src/main.rs"
+test = false
+bench = false
+
+[dependencies]
+arch-x86_64 = { path = "../crates/arch-x86_64" }
+limine = "0.5"
+spin = "0.10"
+
+[features]
+ktest = []
+ktest-panic = []
+ktest-fault = []

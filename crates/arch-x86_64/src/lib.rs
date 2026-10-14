@@ -5,3 +5,5 @@
 pub mod gdt;
 pub mod idt;
 pub mod trap;
+pub mod cpu;
+pub mod port;
