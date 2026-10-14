@@ -108,23 +108,6 @@ const TIMEOUT: Duration = Duration::from_secs(60);
 
 /// Boots each self-test kernel variant and checks its serial output.
 pub fn run_all() -> crate::Result<()> {
-    // Debug aid: TUKOS_EXTRA_FEATURES=feat1,feat2 boots only the plain ktest
-    // variant with those extra kernel features (e.g. repro-user-fault).
-    if let Ok(extra) = std::env::var("TUKOS_EXTRA_FEATURES") {
-        let mut feats = vec!["ktest"];
-        feats.extend(extra.split(',').filter(|f| !f.is_empty()));
-        let esp = crate::image::build(&feats)?;
-        let (outcome, serial) = crate::qemu::run_captured(&esp, TIMEOUT)?;
-        check_ktest(outcome, &parse(&serial)).map_err(|e| {
-            format!(
-                "variante {}: {e}
---- serial ---
-{serial}",
-                feats.join("+")
-            )
-        })?;
-        return Ok(());
-    }
     run_variant("ktest", check_ktest)?;
     run_variant("ktest-panic", |o, r| {
         check_expected_panic(o, r, &["ktest-panic deliberado"])

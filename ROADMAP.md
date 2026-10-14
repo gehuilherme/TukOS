@@ -15,4 +15,4 @@
 
 **Marco atual:** Marco 1 praticamente atingido do lado do `.exe` — boot no QEMU (0, 1) + `.exe` de console **real do MSVC com CRT completo** (`hello.c` via `printf`, `/MT`) roda no TukOS e confere stdout + exit code com o Windows real (harness: ntdll, kernel32, heap, crt). Partes de 2 (object manager, processos) e de 4 (`kernel32` com superfície do CRT + heap) prontas.
 
-**Em aberto:** I/O manager e registro (resto do subprojeto 2); `user32`/`gdi32` e gerenciador de janelas (resto do 4); endurecer o kernel (um #PF de usuário não deve causar panic do kernel).
+**Em aberto:** I/O manager e registro (resto do subprojeto 2); `user32`/`gdi32` e gerenciador de janelas (resto do 4).

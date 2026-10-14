@@ -73,6 +73,15 @@ const TESTS: &[(&str, TestFn)] = &[
     ),
     ("ntwritefile_rejects_unmapped", ntwritefile_rejects_unmapped),
     ("nt_terminate_exits_and_reaps", nt_terminate_exits_and_reaps),
+    // Plan 14: a Ring-3 fault must terminate the process, not panic the kernel.
+    (
+        "user_fault_terminates_not_panics",
+        user_fault_terminates_not_panics,
+    ),
+    (
+        "user_ud_terminates_not_panics",
+        user_ud_terminates_not_panics,
+    ),
     ("ntwritefile_fills_iosb", ntwritefile_fills_iosb),
     ("ntwritefile_bad_handle", ntwritefile_bad_handle),
     ("exe_imports_ntdll_and_runs", exe_imports_ntdll_and_runs),
@@ -142,26 +151,53 @@ const TESTS: &[(&str, TestFn)] = &[
     ("valloc_basic", valloc_basic),
     ("valloc_rejects_overlap", valloc_rejects_overlap),
     ("valloc_rejects_kernel_range", valloc_rejects_kernel_range),
-    // Plan 14: gated reproducer; must stay LAST (panics the kernel today).
-    (
-        "user_fault_terminates_not_panics",
-        user_fault_terminates_not_panics,
-    ),
 ];
 
-/// Without `repro-user-fault` this is a no-op. With it, a Ring-3 thread takes a
-/// #PF; today `trap::handle` panics the kernel (docs/observations/2026-10-14-...).
-fn user_fault_terminates_not_panics() -> Result<(), &'static str> {
-    #[cfg(feature = "repro-user-fault")]
-    {
-        crate::process::spawn_faulting_pe();
-        for _ in 0..8000 {
-            crate::sched::yield_now();
-        }
-        Err("fault de usuario nao foi tratado nem panicou")
+static SURVIVOR_RAN: AtomicU64 = AtomicU64::new(0);
+
+fn survivor() {
+    SURVIVOR_RAN.fetch_add(1, Ordering::SeqCst);
+    crate::sched::exit_current();
+}
+
+/// Spawns a faulting user process via `spawn`, then checks: the kernel survives
+/// (we are still running), the process is reaped (frames back to baseline) and
+/// another thread still runs afterwards.
+fn fault_contained(spawn: fn() -> usize) -> Result<(), &'static str> {
+    // Let earlier leftovers finish being reaped so `before` is stable.
+    for _ in 0..4000 {
+        crate::sched::yield_now();
     }
-    #[cfg(not(feature = "repro-user-fault"))]
-    Ok(())
+    let before = crate::mem::frames::free_frame_count();
+    spawn();
+    let mut reaped = false;
+    for _ in 0..8000 {
+        crate::sched::yield_now();
+        if crate::mem::frames::free_frame_count() == before {
+            reaped = true;
+            break;
+        }
+    }
+    if !reaped {
+        return Err("processo que faltou nao foi terminado/reapeado");
+    }
+    let n = SURVIVOR_RAN.load(Ordering::SeqCst);
+    crate::sched::spawn(survivor);
+    for _ in 0..100 {
+        if SURVIVOR_RAN.load(Ordering::SeqCst) > n {
+            return Ok(());
+        }
+        crate::sched::yield_now();
+    }
+    Err("outra thread nao executou apos o fault de usuario")
+}
+
+fn user_fault_terminates_not_panics() -> Result<(), &'static str> {
+    fault_contained(crate::process::spawn_faulting_pe)
+}
+
+fn user_ud_terminates_not_panics() -> Result<(), &'static str> {
+    fault_contained(crate::process::spawn_ud_pe)
 }
 
 fn ntdll_embedded_parses() -> Result<(), &'static str> {

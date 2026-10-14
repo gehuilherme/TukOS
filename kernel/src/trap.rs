@@ -62,6 +62,21 @@ pub fn handle(frame: &mut TrapFrame) {
         return;
     }
     let cr2 = arch_x86_64::cpu::read_cr2();
+    if frame.cs & 3 == 3 {
+        // Ring-3 fault: terminate the faulting process, keep the kernel alive.
+        // No kernel lock is held (we came from user mode); the trap frame is
+        // abandoned exactly like on SYS_EXIT.
+        crate::kprintln!(
+            "falha de usuario: {} (vetor {}) err=0x{:x} rip=0x{:x} cr2=0x{:x}; processo terminado",
+            exception_name(frame.vector),
+            frame.vector,
+            frame.error_code,
+            frame.rip,
+            cr2
+        );
+        crate::sched::exit_current();
+    }
+    // CPL 0: a kernel fault is our bug.
     panic!(
         "excecao {} {} err=0x{:x} rip=0x{:x} cr2=0x{:x}\n{:#x?}",
         frame.vector,

@@ -306,14 +306,22 @@ pub fn build_import_pe(func: &str, iat_writable: bool) -> alloc::vec::Vec<u8> {
     pe
 }
 
-/// Reproducer (Plan 14, temporary): a PE whose entry derefs unmapped user VA 0x1
-/// (`mov rax, [0x1]`), i.e. a deterministic Ring-3 #PF.
-#[cfg(feature = "repro-user-fault")]
+/// Test PE whose entry derefs unmapped user VA 0x1 (`mov rax, [0x1]`): a
+/// deterministic Ring-3 #PF (Plan 14 regression).
+#[cfg(feature = "ktest")]
 pub fn spawn_faulting_pe() -> usize {
     const TEXT: [u8; 10] = [
         0x48, 0x8B, 0x04, 0x25, 0x01, 0x00, 0x00, 0x00, // mov rax, [0x1]
         0x0F, 0x0B, // ud2 (never reached)
     ];
+    let pe = build_pe(0x1000, &TEXT, TEXT.len() as u32, SCN_CODE_EXEC_READ);
+    spawn_pe(&pe, PE_IMAGE_BASE)
+}
+
+/// Test PE whose entry is `ud2`: a Ring-3 #UD (vector 6).
+#[cfg(feature = "ktest")]
+pub fn spawn_ud_pe() -> usize {
+    const TEXT: [u8; 2] = [0x0F, 0x0B]; // ud2
     let pe = build_pe(0x1000, &TEXT, TEXT.len() as u32, SCN_CODE_EXEC_READ);
     spawn_pe(&pe, PE_IMAGE_BASE)
 }
