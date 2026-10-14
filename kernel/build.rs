@@ -6,6 +6,7 @@ fn main() {
     println!("cargo:rerun-if-changed=linker.ld");
     embed_conformance(&dir, "hello.exe", "conformance.exe");
     embed_conformance(&dir, "hello32.exe", "conformance32.exe");
+    embed_conformance(&dir, "heap.exe", "conformance_heap.exe");
 
     // Embed the ntdll.dll produced by `cargo xtask ntdll` (we only copy the
     // artifact: no nested cargo, so no target-lock contention). If it is

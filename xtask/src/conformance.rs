@@ -8,6 +8,7 @@ use std::time::Duration;
 
 const BEGIN: &str = "@@TUKOS-CONFORMANCE-BEGIN";
 const END: &str = "@@TUKOS-CONFORMANCE-END";
+const EXIT_MARK: &str = "@@TUKOS-CONFORMANCE-EXIT";
 const TIMEOUT: Duration = Duration::from_secs(60);
 
 /// Text the TukOS kernel printed between the BEGIN and END markers, with CRLF
@@ -20,6 +21,12 @@ pub fn extract_output(serial: &str) -> Option<String> {
     let body = &rest[nl..];
     let e = body.find(END)?;
     Some(body[..e].replace("\r\n", "\n"))
+}
+
+/// Exit status the TukOS kernel reported via the EXIT marker. `None` if absent/unparsable.
+pub fn extract_exit(serial: &str) -> Option<i32> {
+    let i = serial.find(EXIT_MARK)? + EXIT_MARK.len();
+    serial[i..].lines().next()?.trim().parse().ok()
 }
 
 /// Locates `vcvars64.bat` via vswhere (VC tools component). `None` when MSVC is absent.
@@ -91,13 +98,10 @@ fn run_case(label: &str, exe: &Path, features: &[&str]) -> crate::Result<()> {
         .stderr(Stdio::inherit())
         .output()
         .map_err(|e| format!("falha ao executar {}: {e}", exe.display()))?;
-    if !reference.status.success() {
-        return Err(format!(
-            "{label}: {} no Windows terminou com {}",
-            exe.display(),
-            reference.status
-        ));
-    }
+    let want_code = reference
+        .status
+        .code()
+        .ok_or_else(|| format!("{label}: sem exit code no Windows"))?;
     let expected = String::from_utf8_lossy(&reference.stdout).replace("\r\n", "\n");
 
     // TukOS: the kernel embeds the exes (build.rs) and runs one in conformance mode.
@@ -128,8 +132,20 @@ fn run_case(label: &str, exe: &Path, features: &[&str]) -> crate::Result<()> {
             actual.len()
         ));
     }
+    let actual_code = extract_exit(&serial).ok_or_else(|| {
+        format!(
+            "{label}: marcador de exit ausente
+--- serial ---
+{serial}"
+        )
+    })?;
+    if actual_code != want_code {
+        return Err(format!(
+            "{label}: exit code difere (Windows {want_code}, TukOS {actual_code})"
+        ));
+    }
     println!(
-        "conformance[{label}]: PASS ({} bytes identicos): {expected:?}",
+        "conformance[{label}]: PASS ({} bytes identicos, exit={actual_code}): {expected:?}",
         expected.len()
     );
     Ok(())
@@ -151,8 +167,10 @@ pub fn run_conformance() -> crate::Result<()> {
     // hello.exe links ntdll only; hello32.exe links kernel32 only (kernel32 imports ntdll itself).
     let hello = build_exe(&vcvars, &root, "hello", "hello", &ntdll_lib)?;
     let hello32 = build_exe(&vcvars, &root, "hello32", "hello32", &k32_lib)?;
+    let heap = build_exe(&vcvars, &root, "heap", "heap", &k32_lib)?;
     run_case("ntdll", &hello, &["conformance"])?;
     run_case("kernel32", &hello32, &["conformance32"])?;
+    run_case("heap", &heap, &["conformance_heap"])?;
     Ok(())
 }
 
@@ -164,6 +182,19 @@ mod tests {
     fn extracts_between_markers() {
         let s = "boot noise\r\n@@TUKOS-CONFORMANCE-BEGIN\r\nHello\r\n@@TUKOS-CONFORMANCE-END\r\nx";
         assert_eq!(extract_output(s).as_deref(), Some("Hello\n"));
+    }
+
+    #[test]
+    fn extracts_exit() {
+        assert_eq!(
+            extract_exit(
+                "x
+@@TUKOS-CONFORMANCE-EXIT 7
+y"
+            ),
+            Some(7)
+        );
+        assert_eq!(extract_exit("nada"), None);
     }
 
     #[test]

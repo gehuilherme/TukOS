@@ -21,7 +21,7 @@ pub const STATUS_INVALID_HANDLE: u64 = 0xC000_0008;
 #[cfg(feature = "ktest")]
 pub static LAST_WRITE_LEN: AtomicU64 = AtomicU64::new(0);
 /// Status passed to the most recent NtTerminateProcess (u64::MAX = none yet).
-#[cfg(feature = "ktest")]
+#[cfg(any(feature = "ktest", feature = "conformance"))]
 pub static LAST_TERMINATE_STATUS: AtomicU64 = AtomicU64::new(u64::MAX);
 #[cfg(feature = "ktest")]
 static LAST_WRITE: IrqMutex<[u8; 64]> = IrqMutex::new([0; 64]);
@@ -206,7 +206,7 @@ pub extern "C" fn dispatch(nr: u64, a0: u64, a1: u64, a2: u64, _a3: u64, _user_r
             _ => STATUS_INVALID_HANDLE,
         },
         NT_TERMINATE_PROCESS => {
-            #[cfg(feature = "ktest")]
+            #[cfg(any(feature = "ktest", feature = "conformance"))]
             LAST_TERMINATE_STATUS.store(a1 as u32 as u64, Ordering::SeqCst);
             if crate::sched::current_is_user() {
                 crate::sched::exit_current();
