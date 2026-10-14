@@ -1505,28 +1505,32 @@ fn yield_from_depth(depth: u32) -> u64 {
     pad[5]
 }
 
-/// Plan 12 / task 1 reproducer. Leaves the boot thread as the only live thread
-/// while the others stay in the Vec as Exited; every yield then makes
-/// switch_to_next pick to==from (self-switch) and restore the STALE rsp.
+/// Plan 12 regression: with the boot thread as the only live thread and the
+/// others left `Exited` in the thread table, `switch_to_next` used to pick
+/// to==from and restore a stale rsp (#PF). It must now return without switching.
+/// See docs/observations/2026-10-14-scheduler-reap-pf.md.
 fn single_thread_after_exit_no_fault() -> Result<(), &'static str> {
-    // Sem a feature `repro-sched-pf` o corpo e pulado: ele FAZ O KERNEL DAR #PF
-    // (rip=1) enquanto o bug existir. A task 2 corrige o bug e remove o gate.
-    if !cfg!(feature = "repro-sched-pf") {
-        return Ok(());
+    let before = crate::mem::frames::free_frame_count();
+    crate::process::spawn_exiting_user();
+    // Let it run, exit and be reaped (frames back to baseline).
+    let mut reaped = false;
+    for _ in 0..4000 {
+        crate::sched::yield_now();
+        if crate::mem::frames::free_frame_count() == before {
+            reaped = true;
+            break;
+        }
     }
-    use core::sync::atomic::Ordering;
-    // Make boot's saved rsp non-zero/stale: a normal yield with other threads alive.
-    crate::sched::yield_now();
-    crate::sched::debug_retire_others();
-    let before = crate::sched::SELF_SWITCHES.load(Ordering::SeqCst);
-    let saved_before = crate::sched::debug_current_saved_rsp();
-    kprintln!("@@REPRO stale saved_rsp={saved_before:#x} self_switches={before}");
+    if !reaped {
+        return Err("thread encerrada nao foi recolhida (frames nao voltaram)");
+    }
+    crate::sched::retire_others_for_test();
+    // Every yield now selects to==from; must keep running on the same stack.
     for i in 0..64u32 {
         yield_from_depth(1 + (i % 7) * 3);
     }
-    let after = crate::sched::SELF_SWITCHES.load(Ordering::SeqCst);
-    if after == before {
-        return Err("o self-switch to==from nao foi alcancado");
+    if crate::mem::frames::free_frame_count() != before {
+        return Err("frames mudaram apos yields com thread unica");
     }
     Ok(())
 }
