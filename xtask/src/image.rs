@@ -50,8 +50,13 @@ fn build_kernel(root: &Path, features: &[&str]) -> crate::Result<PathBuf> {
         "--target",
         "x86_64-unknown-none",
     ]);
-    if !features.is_empty() {
-        cmd.args(["--features", &features.join(",")]);
+    // DIAGNOSTICO (plano 12): TUKOS_EXTRA_FEATURES="sched-debug,repro-sched-pf" liga features extras.
+    let mut feats: Vec<String> = features.iter().map(|f| f.to_string()).collect();
+    if let Ok(extra) = std::env::var("TUKOS_EXTRA_FEATURES") {
+        feats.extend(extra.split(',').filter(|f| !f.is_empty()).map(String::from));
+    }
+    if !feats.is_empty() {
+        cmd.args(["--features", &feats.join(",")]);
     }
     run(&mut cmd)?;
     Ok(root.join("target/x86_64-unknown-none/debug/tukos-kernel"))

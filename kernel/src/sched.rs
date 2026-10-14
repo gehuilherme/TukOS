@@ -52,6 +52,12 @@ struct Scheduler {
 /// Kernel PML4 root, captured in `init` before any user space exists.
 static KERNEL_CR3: AtomicU64 = AtomicU64::new(0);
 
+/// DIAGNOSTICO (plano 12, task 1): quantas vezes switch_to_next escolheu to==from,
+/// o rsp "stale" carregado na ultima vez e quantas threads Exited havia.
+pub static SELF_SWITCHES: AtomicU64 = AtomicU64::new(0);
+pub static SELF_SWITCH_STALE: AtomicU64 = AtomicU64::new(0);
+pub static SELF_SWITCH_EXITED: AtomicU64 = AtomicU64::new(0);
+
 static SCHED: IrqMutex<Option<Scheduler>> = IrqMutex::new(None);
 
 pub fn init() {
@@ -201,6 +207,27 @@ fn switch_to_next() {
         s.current = to;
         let save = &mut s.threads[from].rsp as *mut u64;
         let load = s.threads[to].rsp;
+        // DIAGNOSTICO (plano 12, task 1): remover na task 2.
+        if to == from {
+            SELF_SWITCHES.fetch_add(1, Ordering::SeqCst);
+            SELF_SWITCH_STALE.store(load, Ordering::SeqCst);
+            SELF_SWITCH_EXITED.store(
+                s.threads
+                    .iter()
+                    .filter(|t| t.state == ThreadState::Exited)
+                    .count() as u64,
+                Ordering::SeqCst,
+            );
+            #[cfg(feature = "sched-debug")]
+            {
+                let cur_rsp: u64;
+                unsafe { core::arch::asm!("mov {}, rsp", out(reg) cur_rsp) };
+                crate::kprintln!(
+                    "@@SCHED-SELF-SWITCH from=to={from} n={n} exited={} cur_rsp={cur_rsp:#x} load_rsp(stale)={load:#x}",
+                    SELF_SWITCH_EXITED.load(Ordering::SeqCst)
+                );
+            }
+        }
         (
             save,
             load,
@@ -310,4 +337,26 @@ pub fn yield_now() {
 /// Called from the timer interrupt (interrupts already disabled by the gate).
 pub fn on_tick() {
     switch_to_next();
+}
+
+/// DIAGNOSTICO (plano 12, task 1): marca todas as outras threads como Exited SEM
+/// reapar, deixando so a corrente viva (cenario do #PF: boot sozinho + Exited no Vec).
+#[cfg(feature = "ktest")]
+pub fn debug_retire_others() {
+    let mut guard = SCHED.lock();
+    let s = guard.as_mut().expect("scheduler nao iniciado");
+    let cur = s.current;
+    for (i, t) in s.threads.iter_mut().enumerate() {
+        if i != cur {
+            t.state = ThreadState::Exited;
+        }
+    }
+}
+
+/// DIAGNOSTICO: rsp salvo da thread corrente.
+#[cfg(feature = "ktest")]
+pub fn debug_current_saved_rsp() -> u64 {
+    let guard = SCHED.lock();
+    let s = guard.as_ref().expect("scheduler nao iniciado");
+    s.threads[s.current].rsp
 }

@@ -57,6 +57,10 @@ const TESTS: &[(&str, TestFn)] = &[
         "user_process_exits_and_is_reaped",
         user_process_exits_and_is_reaped,
     ),
+    (
+        "single_thread_after_exit_no_fault",
+        single_thread_after_exit_no_fault,
+    ),
     ("pe_loads_runs_and_exits", pe_loads_runs_and_exits),
     ("load_zero_fills_bss", load_zero_fills_bss),
     (
@@ -1483,6 +1487,46 @@ fn valloc_rejects_kernel_range() -> Result<(), &'static str> {
     }
     if free_frame_count() != before {
         return Err("rejeicao alocou frames");
+    }
+    Ok(())
+}
+
+/// Yields from a deliberately different stack depth than any earlier yield, so a
+/// stale saved rsp (see docs/observations/2026-10-14-scheduler-reap-pf.md) would
+/// point into overwritten stack.
+#[inline(never)]
+fn yield_from_depth(depth: u32) -> u64 {
+    let pad = [depth as u64; 24];
+    let pad = core::hint::black_box(pad);
+    if depth > 0 {
+        return yield_from_depth(depth - 1) + pad[3];
+    }
+    crate::sched::yield_now();
+    pad[5]
+}
+
+/// Plan 12 / task 1 reproducer. Leaves the boot thread as the only live thread
+/// while the others stay in the Vec as Exited; every yield then makes
+/// switch_to_next pick to==from (self-switch) and restore the STALE rsp.
+fn single_thread_after_exit_no_fault() -> Result<(), &'static str> {
+    // Sem a feature `repro-sched-pf` o corpo e pulado: ele FAZ O KERNEL DAR #PF
+    // (rip=1) enquanto o bug existir. A task 2 corrige o bug e remove o gate.
+    if !cfg!(feature = "repro-sched-pf") {
+        return Ok(());
+    }
+    use core::sync::atomic::Ordering;
+    // Make boot's saved rsp non-zero/stale: a normal yield with other threads alive.
+    crate::sched::yield_now();
+    crate::sched::debug_retire_others();
+    let before = crate::sched::SELF_SWITCHES.load(Ordering::SeqCst);
+    let saved_before = crate::sched::debug_current_saved_rsp();
+    kprintln!("@@REPRO stale saved_rsp={saved_before:#x} self_switches={before}");
+    for i in 0..64u32 {
+        yield_from_depth(1 + (i % 7) * 3);
+    }
+    let after = crate::sched::SELF_SWITCHES.load(Ordering::SeqCst);
+    if after == before {
+        return Err("o self-switch to==from nao foi alcancado");
     }
     Ok(())
 }
