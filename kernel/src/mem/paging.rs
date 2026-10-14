@@ -146,6 +146,8 @@ pub fn translate_user_in(root: u64, virt: u64) -> Option<u64> {
 
 /// Like [`translate_user_in`] but the leaf must also be WRITABLE (user-copy
 /// write validation: a read-only page yields `None`).
+// Intermediate levels are not WRITABLE-checked: the mapper always creates them WRITABLE,
+// so effective writability equals the leaf's WRITABLE bit.
 pub fn translate_user_writable_in(root: u64, virt: u64) -> Option<u64> {
     translate_user_flags_in(root, virt, true)
 }
@@ -176,7 +178,7 @@ fn translate_user_flags_in(root: u64, virt: u64, need_write: bool) -> Option<u64
     }
 }
 
-///ktest helper: marks the PD entry covering a mapped USER page as HUGE and
+/// ktest helper: marks the PD entry covering a mapped USER page as HUGE and
 /// checks `translate_user_in` refuses it, then restores the entry.
 #[cfg(feature = "ktest")]
 pub fn test_huge_rejected() -> Result<(), &'static str> {

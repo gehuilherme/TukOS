@@ -1,5 +1,5 @@
 fn main() {
-    // Sem CRT: a DLL nao tem ponto de entrada nem bibliotecas padrao.
+    // No CRT: the DLL has no entry point and no default libraries.
     println!("cargo:rustc-cdylib-link-arg=/NOENTRY");
     println!("cargo:rustc-cdylib-link-arg=/NODEFAULTLIB");
 }

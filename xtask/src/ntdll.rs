@@ -3,7 +3,7 @@ use std::process::Command;
 
 const TARGET: &str = "x86_64-pc-windows-msvc";
 
-/// Compila `crates/ntdll` para Windows x64 (release) e devolve o caminho da DLL.
+/// Builds `crates/ntdll` for Windows x64 (release) and returns the DLL path.
 pub fn build() -> crate::Result<PathBuf> {
     crate::util::run(Command::new("cargo").args([
         "build",
@@ -33,7 +33,9 @@ mod tests {
         std::fs::read(&dll).expect("read ntdll.dll")
     }
 
+    // Needs the MSVC linker, so only run on Windows hosts.
     #[test]
+    #[cfg_attr(not(target_os = "windows"), ignore)]
     fn ntdll_dll_exports_nt_functions() {
         let bytes = built();
         let pe = pe::PeFile::parse(&bytes).expect("ntdll.dll e um PE valido");
@@ -56,7 +58,9 @@ mod tests {
         );
     }
 
+    // Needs the MSVC linker, so only run on Windows hosts.
     #[test]
+    #[cfg_attr(not(target_os = "windows"), ignore)]
     fn ntdll_exports_expected_syscall_numbers() {
         let bytes = built();
         let pe = pe::PeFile::parse(&bytes).expect("parse");
@@ -71,7 +75,9 @@ mod tests {
                 .find(|e| e.name == name)
                 .unwrap_or_else(|| panic!("{name} ausente"));
             let off = pe.rva_to_offset(e.rva).expect("rva->offset");
-            let stub = &bytes[off..off + 16];
+            let stub = bytes
+                .get(off..off + 16)
+                .unwrap_or_else(|| panic!("{name}: stub beyond end of file"));
             let idx = stub
                 .iter()
                 .position(|&b| b == 0xB8)
