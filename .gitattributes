@@ -1,3 +1,4 @@
 * text=auto eol=lf
 *.fd binary
 *.EFI binary
+*.pdf binary
