@@ -5,6 +5,7 @@
 extern crate alloc;
 
 use crate::mem::space::AddressSpace;
+use crate::object::{CONSOLE_HANDLE, HandleTable, Object};
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 use arch_x86_64::interrupts::IrqMutex;
@@ -35,6 +36,8 @@ struct Thread {
     space: Option<AddressSpace>,
     /// User VA of the thread's TEB (reached via GS in Ring 3); 0 = none.
     teb_va: u64,
+    /// Handle table of a user process; None for kernel threads.
+    handle_table: Option<HandleTable>,
 }
 
 struct Scheduler {
@@ -60,6 +63,7 @@ pub fn init() {
         state: ThreadState::Ready,
         space: None,
         teb_va: 0,
+        handle_table: None,
     };
     let mut threads = Vec::with_capacity(MAX_THREADS);
     threads.push(boot);
@@ -116,6 +120,7 @@ pub fn spawn(entry: fn()) -> usize {
         state: ThreadState::Ready,
         space: None,
         teb_va: 0,
+        handle_table: None,
     });
     s.threads.len() - 1
 }
@@ -147,6 +152,9 @@ pub fn spawn_user(
         p.add(10).write(user_stack_top);
         p.add(11).write(arch_x86_64::gdt::USER_DS as u64);
     }
+    let mut handles = HandleTable::new();
+    let console = handles.insert(Object::Console);
+    debug_assert_eq!(console, CONSOLE_HANDLE);
     let mut guard = SCHED.lock();
     let s = guard.as_mut().expect("scheduler nao iniciado");
     assert!(
@@ -162,6 +170,7 @@ pub fn spawn_user(
         state: ThreadState::Ready,
         space: Some(space),
         teb_va,
+        handle_table: Some(handles),
     });
     s.threads.len() - 1
 }
@@ -264,6 +273,16 @@ pub fn current_is_user() -> bool {
     guard
         .as_ref()
         .is_some_and(|s| s.threads[s.current].space.is_some())
+}
+
+/// Runs `f` on the current user thread's handle table; None for kernel threads.
+/// Holds the SCHED lock while `f` runs: `f` must not call back into the scheduler.
+#[allow(dead_code)] // used by Task 4 (NtWriteFile/NtClose)
+pub fn with_current_handles<R>(f: impl FnOnce(&mut HandleTable) -> R) -> Option<R> {
+    let mut guard = SCHED.lock();
+    let s = guard.as_mut()?;
+    let cur = s.current;
+    s.threads[cur].handle_table.as_mut().map(f)
 }
 
 pub fn yield_now() {

@@ -9,6 +9,7 @@ mod fbcon;
 mod ktest;
 mod loader;
 mod mem;
+mod object;
 mod panic;
 mod process;
 mod qemu;

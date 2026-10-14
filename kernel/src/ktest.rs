@@ -90,7 +90,36 @@ const TESTS: &[(&str, TestFn)] = &[
         "stack_args_rejected_when_user_rsp_bad",
         stack_args_rejected_when_user_rsp_bad,
     ),
+    (
+        "handle_table_bounds_and_close",
+        handle_table_bounds_and_close,
+    ),
 ];
+
+fn handle_table_bounds_and_close() -> Result<(), &'static str> {
+    use crate::object::{HandleTable, Object};
+    let mut t = HandleTable::new();
+    if t.get(0).is_some() {
+        return Err("handle 0 deveria ser invalido");
+    }
+    if t.get(0x1000).is_some() {
+        return Err("handle fora da faixa deveria ser invalido");
+    }
+    let h = t.insert(Object::Console);
+    if !matches!(t.get(h), Some(Object::Console)) {
+        return Err("handle valido nao resolveu");
+    }
+    if !t.close(h) {
+        return Err("close de handle valido falhou");
+    }
+    if t.get(h).is_some() {
+        return Err("handle fechado ainda resolve");
+    }
+    if t.close(h) {
+        return Err("close duplo deveria falhar");
+    }
+    Ok(())
+}
 
 fn syscall_reads_six_args_reg_and_stack() -> Result<(), &'static str> {
     use core::sync::atomic::Ordering;
