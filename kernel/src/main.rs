@@ -7,6 +7,7 @@ mod console;
 mod fbcon;
 #[cfg(feature = "ktest")]
 mod ktest;
+mod loader;
 mod mem;
 mod panic;
 mod process;

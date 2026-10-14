@@ -57,6 +57,8 @@ const TESTS: &[(&str, TestFn)] = &[
         "user_process_exits_and_is_reaped",
         user_process_exits_and_is_reaped,
     ),
+    ("pe_loads_runs_and_exits", pe_loads_runs_and_exits),
+    ("load_zero_fills_bss", load_zero_fills_bss),
     ("two_user_processes_preempt", two_user_processes_preempt),
 ];
 
@@ -500,6 +502,48 @@ fn user_process_exits_and_is_reaped() -> Result<(), &'static str> {
         }
     }
     Err("processo de usuario nao foi recolhido (frames nao voltaram)")
+}
+
+fn pe_loads_runs_and_exits() -> Result<(), &'static str> {
+    use core::sync::atomic::Ordering;
+    let before = crate::mem::frames::free_frame_count();
+    crate::syscall::LAST_MARK.store(0, Ordering::SeqCst);
+    // The embedded test PE: SYS_WRITE_MARK(0x5E) then SYS_EXIT(0).
+    crate::process::spawn_test_pe();
+    let mut marked = false;
+    for _ in 0..8000 {
+        crate::sched::yield_now();
+        if crate::syscall::LAST_MARK.load(Ordering::SeqCst) == 0x5E {
+            marked = true;
+        }
+        if marked && crate::mem::frames::free_frame_count() == before {
+            return Ok(());
+        }
+    }
+    Err("PE nao carregou/rodou/saiu com recuperacao de frames")
+}
+
+fn load_zero_fills_bss() -> Result<(), &'static str> {
+    // A section with virtual_size > raw.len() must be zero-filled by the loader.
+    use crate::mem::space::AddressSpace;
+    let space = AddressSpace::new_user();
+    // Build a 1-page section at RVA 0x1000, raw = [0xAA], virtual_size = 0x20.
+    let image = crate::process::build_bss_test_pe();
+    let base = 0x40_0000u64;
+    let entry = crate::loader::load_pe(&space, &image, base).map_err(|_| "load falhou")?;
+    let _ = entry;
+    // Read the mapped page via the space: byte 0 == 0xAA, byte 1..0x20 == 0.
+    let phys = space.translate(base + 0x1000).ok_or("secao nao mapeada")?;
+    let p = crate::mem::frames::phys_to_virt(phys) as *const u8;
+    unsafe {
+        if core::ptr::read_volatile(p) != 0xAA {
+            return Err("byte bruto nao copiado");
+        }
+        if core::ptr::read_volatile(p.add(1)) != 0x00 {
+            return Err("excedente do .bss nao foi zerado");
+        }
+    }
+    Ok(())
 }
 
 fn two_user_processes_preempt() -> Result<(), &'static str> {
