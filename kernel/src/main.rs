@@ -33,6 +33,12 @@ static _END_MARKER: RequestsEndMarker = RequestsEndMarker::new();
 #[unsafe(no_mangle)]
 unsafe extern "C" fn kmain() -> ! {
     serial::init();
+    // Install the trap machinery first so no early exception is silent.
+    arch_x86_64::trap::set_handler(trap::handle);
+    unsafe {
+        arch_x86_64::gdt::init();
+        arch_x86_64::idt::init();
+    }
     fbcon::init_from_limine();
     kprintln!("TukOS {} iniciando", env!("CARGO_PKG_VERSION"));
     assert!(
@@ -40,18 +46,17 @@ unsafe extern "C" fn kmain() -> ! {
         "revisao base do Limine nao suportada"
     );
 
-    unsafe {
-        arch_x86_64::gdt::init();
-        arch_x86_64::idt::init();
-    }
-    arch_x86_64::trap::set_handler(trap::handle);
     kprintln!("TukOS pronto");
 
     #[cfg(feature = "ktest")]
     ktest::run_all();
 
     #[cfg(feature = "ktest-panic")]
-    panic!("ktest-panic deliberado");
+    {
+        // Prove the panic path works even while the serial lock is held.
+        let _guard = serial::SERIAL.lock();
+        panic!("ktest-panic deliberado");
+    }
 
     #[cfg(feature = "ktest-fault")]
     unsafe {
