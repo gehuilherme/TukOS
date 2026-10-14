@@ -13,6 +13,12 @@ pub enum LoadError {
     Alloc,
     UnsupportedReloc,
     Overflow,
+    /// Import by ordinal (deferred to Plan 9).
+    UnsupportedImport,
+    /// Imported function not exported by the target module (no stub in this plan).
+    UnresolvedImport,
+    /// IAT slot is outside the exe image or not in writable mapped user pages.
+    BadIatSlot,
 }
 
 const PAGE: u64 = 4096;
@@ -128,4 +134,64 @@ pub fn load_pe(space: &AddressSpace, image: &[u8], load_base: u64) -> Result<u64
     load_base
         .checked_add(pe.entry_point_rva() as u64)
         .ok_or(LoadError::Overflow)
+}
+
+/// Translates `va` to a pointer (via the HHDM alias of its frame) if the user
+/// page is mapped writable, else None.
+fn writable_ptr(space: &AddressSpace, va: u64) -> Option<*mut u8> {
+    let phys = crate::mem::paging::translate_user_writable_in(space.root(), va & !(PAGE - 1))?;
+    Some((phys_to_virt(phys) + (va & (PAGE - 1))) as *mut u8)
+}
+
+/// Resolves the imports of `exe` (loaded at `exe_base`) that target `ntdll.dll`
+/// against the exports of `ntdll` (loaded at `ntdll_base`), writing each address
+/// into the exe's IAT. Only by-name imports are supported (ordinals ->
+/// `UnsupportedImport`); a name missing from the ntdll exports yields
+/// `UnresolvedImport` (no "unimplemented" stub in this plan). Each 8-byte IAT slot
+/// is validated to lie inside the exe image and in writable user pages (W^X per
+/// section means a code-section slot is rejected with `BadIatSlot`) before being
+/// written through the frame's HHDM alias, never through the user VA.
+pub fn resolve_imports(
+    space: &AddressSpace,
+    exe: &[u8],
+    exe_base: u64,
+    ntdll: &[u8],
+    ntdll_base: u64,
+) -> Result<(), LoadError> {
+    let exe_pe = PeFile::parse(exe).map_err(LoadError::Parse)?;
+    let ntdll_pe = PeFile::parse(ntdll).map_err(LoadError::Parse)?;
+    let exe_top = image_top(exe, exe_base)?;
+    for dll in exe_pe.imports().map_err(LoadError::Parse)? {
+        if !dll.name.eq_ignore_ascii_case("ntdll.dll") {
+            continue;
+        }
+        for entry in dll.thunks {
+            let name = match entry.kind {
+                pe::ImportKind::Name { name, .. } => name,
+                pe::ImportKind::Ordinal(_) => return Err(LoadError::UnsupportedImport),
+            };
+            let rva = ntdll_pe
+                .export_rva_by_name(name)
+                .ok_or(LoadError::UnresolvedImport)?;
+            let addr = ntdll_base
+                .checked_add(rva as u64)
+                .ok_or(LoadError::Overflow)?;
+            let slot = exe_base
+                .checked_add(entry.iat_rva as u64)
+                .ok_or(LoadError::BadIatSlot)?;
+            let end = slot.checked_add(8).ok_or(LoadError::BadIatSlot)?;
+            if end > exe_top {
+                return Err(LoadError::BadIatSlot);
+            }
+            // Validate all 8 bytes before writing any (the slot may straddle pages).
+            let mut ptrs = [core::ptr::null_mut::<u8>(); 8];
+            for (i, p) in ptrs.iter_mut().enumerate() {
+                *p = writable_ptr(space, slot + i as u64).ok_or(LoadError::BadIatSlot)?;
+            }
+            for (p, b) in ptrs.iter().zip(addr.to_le_bytes()) {
+                unsafe { core::ptr::write_volatile(*p, b) };
+            }
+        }
+    }
+    Ok(())
 }

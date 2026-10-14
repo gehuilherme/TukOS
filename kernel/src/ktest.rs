@@ -85,6 +85,15 @@ const TESTS: &[(&str, TestFn)] = &[
     ),
     ("translate_user_rejects_huge", translate_user_rejects_huge),
     ("ntdll_embedded_parses", ntdll_embedded_parses),
+    ("two_modules_no_overlap", two_modules_no_overlap),
+    (
+        "import_resolve_rejects_bad_iat_slot",
+        import_resolve_rejects_bad_iat_slot,
+    ),
+    (
+        "import_resolve_unknown_function",
+        import_resolve_unknown_function,
+    ),
     (
         "load_pe_rejects_malformed_without_panic",
         load_pe_rejects_malformed_without_panic,
@@ -113,6 +122,76 @@ fn ntdll_embedded_parses() -> Result<(), &'static str> {
         return Err("ntdll embutido nao exporta NtWriteFile");
     }
     Ok(())
+}
+
+const EXE_BASE: u64 = 0x40_0000;
+const NTDLL_BASE: u64 = 0x1000_0000;
+
+fn two_modules_no_overlap() -> Result<(), &'static str> {
+    use crate::mem::space::AddressSpace;
+    let nt = crate::ntdll_image::NTDLL_BYTES;
+    if nt.is_empty() {
+        return Ok(());
+    }
+    let exe = crate::process::build_import_pe("NtWriteFile", true);
+    let space = AddressSpace::new_user();
+    crate::loader::load_pe(&space, &exe, EXE_BASE).map_err(|_| "load exe falhou")?;
+    crate::loader::load_pe(&space, nt, NTDLL_BASE).map_err(|_| "load ntdll falhou")?;
+    let exe_top = crate::loader::image_top(&exe, EXE_BASE).map_err(|_| "top exe")?;
+    let nt_top = crate::loader::image_top(nt, NTDLL_BASE).map_err(|_| "top ntdll")?;
+    if exe_top > NTDLL_BASE || nt_top <= NTDLL_BASE {
+        return Err("faixas de VA dos modulos se sobrepoem");
+    }
+    crate::loader::resolve_imports(&space, &exe, EXE_BASE, nt, NTDLL_BASE)
+        .map_err(|_| "resolve falhou")?;
+    // IAT slot (RVA 0x1060) must now hold NTDLL_BASE + export RVA.
+    let rva = pe::PeFile::parse(nt)
+        .map_err(|_| "parse ntdll")?
+        .export_rva_by_name("NtWriteFile")
+        .ok_or("sem NtWriteFile")?;
+    let phys = space
+        .translate(EXE_BASE + 0x1000)
+        .ok_or("IAT nao mapeada")?;
+    let p = (crate::mem::frames::phys_to_virt(phys) + 0x60) as *const u64;
+    if unsafe { core::ptr::read_volatile(p) } != NTDLL_BASE + rva as u64 {
+        return Err("IAT nao recebeu o endereco resolvido");
+    }
+    Ok(())
+}
+
+fn import_resolve_rejects_bad_iat_slot() -> Result<(), &'static str> {
+    use crate::loader::LoadError;
+    use crate::mem::space::AddressSpace;
+    let nt = crate::ntdll_image::NTDLL_BYTES;
+    if nt.is_empty() {
+        return Ok(());
+    }
+    // IAT lives in a read+execute (non-writable) section.
+    let exe = crate::process::build_import_pe("NtWriteFile", false);
+    let space = AddressSpace::new_user();
+    crate::loader::load_pe(&space, &exe, EXE_BASE).map_err(|_| "load exe falhou")?;
+    crate::loader::load_pe(&space, nt, NTDLL_BASE).map_err(|_| "load ntdll falhou")?;
+    match crate::loader::resolve_imports(&space, &exe, EXE_BASE, nt, NTDLL_BASE) {
+        Err(LoadError::BadIatSlot) => Ok(()),
+        _ => Err("slot de IAT nao gravavel deveria dar BadIatSlot"),
+    }
+}
+
+fn import_resolve_unknown_function() -> Result<(), &'static str> {
+    use crate::loader::LoadError;
+    use crate::mem::space::AddressSpace;
+    let nt = crate::ntdll_image::NTDLL_BYTES;
+    if nt.is_empty() {
+        return Ok(());
+    }
+    let exe = crate::process::build_import_pe("NoSuchFunction", true);
+    let space = AddressSpace::new_user();
+    crate::loader::load_pe(&space, &exe, EXE_BASE).map_err(|_| "load exe falhou")?;
+    crate::loader::load_pe(&space, nt, NTDLL_BASE).map_err(|_| "load ntdll falhou")?;
+    match crate::loader::resolve_imports(&space, &exe, EXE_BASE, nt, NTDLL_BASE) {
+        Err(LoadError::UnresolvedImport) => Ok(()),
+        _ => Err("funcao inexistente deveria dar UnresolvedImport"),
+    }
 }
 
 fn handle_table_bounds_and_close() -> Result<(), &'static str> {

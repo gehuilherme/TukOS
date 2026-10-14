@@ -280,6 +280,32 @@ pub fn build_reloc_cross_page_pe() -> alloc::vec::Vec<u8> {
     v
 }
 
+/// A PE with one section at RVA 0x1000 holding an import table for
+/// `ntdll.dll!<func>` (descriptor@0, INT@0x40, IAT@0x60). The section is writable
+/// data when `iat_writable`, else read+execute code (so its IAT slot is not writable).
+pub fn build_import_pe(func: &str, iat_writable: bool) -> alloc::vec::Vec<u8> {
+    let mut b = alloc::vec![0u8; 0xC0];
+    put(&mut b, 0, &0x1040u32.to_le_bytes()); // OriginalFirstThunk
+    put(&mut b, 12, &0x1080u32.to_le_bytes()); // Name
+    put(&mut b, 16, &0x1060u32.to_le_bytes()); // FirstThunk
+    for base in [0x40, 0x60] {
+        put(&mut b, base, &0x1090u64.to_le_bytes());
+    }
+    put(&mut b, 0x80, b"ntdll.dll\0");
+    put(&mut b, 0x92, func.as_bytes()); // hint(2)@0x90 = 0, then the name + NUL
+    let ch = if iat_writable {
+        SCN_DATA_RW
+    } else {
+        SCN_CODE_EXEC_READ
+    };
+    let mut pe = build_pe(0x1000, &b, b.len() as u32, ch);
+    // Data directory 1 (import): RVA 0x1000, size 0x28.
+    let d = 0x44 + 20 + 112 + 8;
+    put(&mut pe, d, &0x1000u32.to_le_bytes());
+    put(&mut pe, d + 4, &0x28u32.to_le_bytes());
+    pe
+}
+
 /// The embedded test PE bytes (built once per call and leaked; test use only).
 pub fn test_pe_bytes() -> &'static [u8] {
     build_test_pe().leak()
