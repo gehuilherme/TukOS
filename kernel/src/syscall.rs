@@ -10,6 +10,8 @@ pub const SYS_WRITE_MARK: u64 = 1;
 pub const NT_WRITE_FILE: u64 = 2;
 pub const NT_TERMINATE_PROCESS: u64 = 3;
 pub const NT_CLOSE: u64 = 4;
+pub const NT_ALLOCATE_VIRTUAL_MEMORY: u64 = 5;
+pub const NT_FREE_VIRTUAL_MEMORY: u64 = 6;
 #[cfg(feature = "ktest")]
 pub const SYS_SUM6: u64 = 100;
 pub const STATUS_SUCCESS: u64 = 0;
@@ -89,6 +91,73 @@ pub fn ntwritefile_for_test(handle: u64, _a1: u64, _a2: u64, _a3: u64) -> u64 {
     nt_write_file(handle, 0, 0, 0)
 }
 
+const NT_CURRENT_PROCESS: u64 = u64::MAX; // (HANDLE)-1
+const MEM_COMMIT: u64 = 0x1000;
+const MEM_RELEASE: u64 = 0x8000;
+
+fn read_u64(va: u64) -> Option<u64> {
+    let b = crate::usercopy::copy_from_user(va, 8)?;
+    Some(u64::from_le_bytes(b.as_slice().try_into().ok()?))
+}
+
+/// NtAllocateVirtualMemory for the current process only. `base_ptr`/`size_ptr`
+/// are in/out user pointers; the result is written back only after the pages are
+/// mapped, and the mapping is undone if that write-back fails.
+fn nt_allocate_virtual_memory(
+    process: u64,
+    base_ptr: u64,
+    size_ptr: u64,
+    alloc_type: u64,
+    protect: u64,
+) -> u64 {
+    if process != NT_CURRENT_PROCESS || !crate::sched::current_is_user() {
+        return STATUS_INVALID_HANDLE;
+    }
+    let (Some(req_base), Some(req_size)) = (read_u64(base_ptr), read_u64(size_ptr)) else {
+        return STATUS_ACCESS_VIOLATION;
+    };
+    if alloc_type as u32 as u64 & MEM_COMMIT == 0 {
+        return crate::vmem::STATUS_INVALID_PARAMETER;
+    }
+    let root = crate::arch_cr3_base();
+    let (base, size) = match crate::vmem::alloc_in(root, req_base, req_size, protect as u32) {
+        Ok(r) => r,
+        Err(st) => return st,
+    };
+    if !crate::usercopy::copy_to_user(base_ptr, &base.to_le_bytes())
+        || !crate::usercopy::copy_to_user(size_ptr, &size.to_le_bytes())
+    {
+        let _ = crate::vmem::free_in(root, base, size);
+        return STATUS_ACCESS_VIOLATION;
+    }
+    STATUS_SUCCESS
+}
+
+/// NtFreeVirtualMemory (MEM_RELEASE only; the caller supplies the exact size).
+fn nt_free_virtual_memory(process: u64, base_ptr: u64, size_ptr: u64, free_type: u64) -> u64 {
+    if process != NT_CURRENT_PROCESS || !crate::sched::current_is_user() {
+        return STATUS_INVALID_HANDLE;
+    }
+    let (Some(req_base), Some(req_size)) = (read_u64(base_ptr), read_u64(size_ptr)) else {
+        return STATUS_ACCESS_VIOLATION;
+    };
+    if free_type as u32 as u64 != MEM_RELEASE {
+        return crate::vmem::STATUS_INVALID_PARAMETER;
+    }
+    let root = crate::arch_cr3_base();
+    let (base, size) = match crate::vmem::free_in(root, req_base, req_size) {
+        Ok(r) => r,
+        Err(st) => return st,
+    };
+    // The range is already gone; a bad out-pointer only reports the fault.
+    if !crate::usercopy::copy_to_user(base_ptr, &base.to_le_bytes())
+        || !crate::usercopy::copy_to_user(size_ptr, &size.to_le_bytes())
+    {
+        return STATUS_ACCESS_VIOLATION;
+    }
+    STATUS_SUCCESS
+}
+
 pub extern "C" fn dispatch(nr: u64, a0: u64, a1: u64, a2: u64, _a3: u64, _user_rsp: u64) -> u64 {
     match nr {
         SYS_WRITE_MARK => {
@@ -121,6 +190,17 @@ pub extern "C" fn dispatch(nr: u64, a0: u64, a1: u64, a2: u64, _a3: u64, _user_r
             };
             nt_write_file(a0, iosb, buf, len)
         }
+        NT_ALLOCATE_VIRTUAL_MEMORY => {
+            // NtAllocateVirtualMemory(Process, *Base, ZeroBits, *Size, AllocType,
+            // Protect): ZeroBits (a2) is ignored; the last two are on the stack.
+            let (Some(alloc_type), Some(protect)) =
+                (stack_arg(_user_rsp, 0), stack_arg(_user_rsp, 1))
+            else {
+                return STATUS_ACCESS_VIOLATION;
+            };
+            nt_allocate_virtual_memory(a0, a1, _a3, alloc_type, protect)
+        }
+        NT_FREE_VIRTUAL_MEMORY => nt_free_virtual_memory(a0, a1, a2, _a3),
         NT_CLOSE => match crate::sched::with_current_handles(|t| t.close(a0)) {
             Some(true) => STATUS_SUCCESS,
             _ => STATUS_INVALID_HANDLE,

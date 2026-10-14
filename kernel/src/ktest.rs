@@ -132,6 +132,9 @@ const TESTS: &[(&str, TestFn)] = &[
         "handle_table_bounds_and_close",
         handle_table_bounds_and_close,
     ),
+    ("valloc_basic", valloc_basic),
+    ("valloc_rejects_overlap", valloc_rejects_overlap),
+    ("valloc_rejects_kernel_range", valloc_rejects_kernel_range),
 ];
 
 fn ntdll_embedded_parses() -> Result<(), &'static str> {
@@ -1319,6 +1322,129 @@ fn stack_placed_above_image() -> Result<(), &'static str> {
     let top = crate::loader::image_top(image, base).map_err(|_| "image_top falhou")?;
     if top <= base + 0x1000 {
         return Err("image_top nao ficou acima da imagem");
+    }
+    Ok(())
+}
+
+// ---- NtAllocateVirtualMemory / NtFreeVirtualMemory (core in vmem.rs) ----
+
+fn valloc_basic() -> Result<(), &'static str> {
+    use crate::mem::frames::{free_frame_count, phys_to_virt};
+    if crate::syscall::NT_ALLOCATE_VIRTUAL_MEMORY != 5
+        || crate::syscall::NT_FREE_VIRTUAL_MEMORY != 6
+    {
+        return Err("numeros de syscall errados");
+    }
+    let before = free_frame_count();
+    let space = crate::mem::space::AddressSpace::new_user();
+    let root = space.root();
+    let (base, size) = crate::vmem::alloc_in(root, 0, 0x3000, crate::vmem::PAGE_READWRITE)
+        .map_err(|_| "alloc falhou")?;
+    if size != 0x3000 || base % 4096 != 0 || base < crate::vmem::USER_MIN {
+        return Err("base/size invalidos");
+    }
+    for i in 0..3u64 {
+        let phys = crate::mem::paging::translate_user_writable_in(root, base + i * 4096)
+            .ok_or("pagina nao mapeada USER|RW")?;
+        let p = phys_to_virt(phys) as *mut u8;
+        for off in 0..4096usize {
+            if unsafe { p.add(off).read() } != 0 {
+                return Err("pagina nao zerada");
+            }
+        }
+        for off in 0..4096usize {
+            unsafe { p.add(off).write((off as u8) ^ (i as u8 + 1)) };
+        }
+    }
+    for i in 0..3u64 {
+        let phys = crate::mem::paging::translate_in(root, base + i * 4096).ok_or("sumiu")?;
+        let p = phys_to_virt(phys) as *const u8;
+        for off in 0..4096usize {
+            if unsafe { p.add(off).read() } != (off as u8) ^ (i as u8 + 1) {
+                return Err("padrao divergiu");
+            }
+        }
+    }
+    // Free: pages are gone and a second free is rejected.
+    crate::vmem::free_in(root, base, size).map_err(|_| "free falhou")?;
+    if crate::mem::paging::translate_in(root, base).is_some() {
+        return Err("pagina ainda mapeada apos free");
+    }
+    if crate::vmem::free_in(root, base, size) != Err(crate::vmem::STATUS_INVALID_PARAMETER) {
+        return Err("free duplo deveria falhar");
+    }
+    // No leak: with the space dropped (tables + PML4 freed) every frame is back.
+    drop(space);
+    if free_frame_count() != before {
+        return Err("vazamento de frames");
+    }
+    Ok(())
+}
+
+fn valloc_rejects_overlap() -> Result<(), &'static str> {
+    use crate::mem::frames::free_frame_count;
+    use mm::paging::PageFlags;
+    let space = crate::mem::space::AddressSpace::new_user();
+    let root = space.root();
+    let frame = crate::mem::frames::alloc_frame().ok_or("sem frame")?;
+    unsafe {
+        space
+            .map(EXE_BASE, frame, PageFlags::USER)
+            .map_err(|_| "map")?;
+    }
+    let before = free_frame_count();
+    // Exact page, a range that starts below and runs into it, and one that only
+    // touches its last page: all must conflict.
+    for (b, s) in [
+        (EXE_BASE, 0x1000u64),
+        (EXE_BASE - 0x2000, 0x3000),
+        (EXE_BASE - 0x1000, 0x2000),
+    ] {
+        if crate::vmem::alloc_in(root, b, s, crate::vmem::PAGE_READWRITE)
+            != Err(crate::vmem::STATUS_CONFLICTING_ADDRESSES)
+        {
+            return Err("sobreposicao nao foi rejeitada");
+        }
+    }
+    if free_frame_count() != before {
+        return Err("rejeicao alocou frames");
+    }
+    if crate::mem::paging::translate_in(root, EXE_BASE - 0x1000).is_some() {
+        return Err("rejeicao deixou pagina mapeada");
+    }
+    Ok(())
+}
+
+fn valloc_rejects_kernel_range() -> Result<(), &'static str> {
+    use crate::mem::frames::free_frame_count;
+    use crate::vmem::{PAGE_READWRITE, STATUS_INVALID_PARAMETER, alloc_in, free_in};
+    let space = crate::mem::space::AddressSpace::new_user();
+    let root = space.root();
+    let before = free_frame_count();
+    let bad: [(u64, u64); 8] = [
+        (0xffff_8000_0000_0000, 0x1000),   // higher half
+        (0xffff_ffff_ffff_f000, 0x1000),   // top of memory
+        (0x0000_7fff_ffff_f000, 0x2000),   // straddles the user limit
+        (0x0000_8000_0000_0000, 0x1000),   // first non-canonical address
+        (0x0000_7fff_ffff_f000, u64::MAX), // size overflow
+        (0xffff_ffff_ffff_f000, 0x2000),   // base+size wraps to 0
+        (0x1000, 0x1000),                  // near-null
+        (0x40_0000, 0),                    // zero size
+    ];
+    for (b, s) in bad {
+        if alloc_in(root, b, s, PAGE_READWRITE) != Err(STATUS_INVALID_PARAMETER) {
+            return Err("faixa invalida aceita");
+        }
+        if free_in(root, b, s) != Err(STATUS_INVALID_PARAMETER) {
+            return Err("free de faixa invalida aceito");
+        }
+    }
+    // Only PAGE_READWRITE is accepted (no executable pages).
+    if alloc_in(root, 0x40_0000, 0x1000, 0x40) != Err(STATUS_INVALID_PARAMETER) {
+        return Err("protecao executavel aceita");
+    }
+    if free_frame_count() != before {
+        return Err("rejeicao alocou frames");
     }
     Ok(())
 }

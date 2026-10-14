@@ -115,7 +115,8 @@ extern "C" fn __CxxFrameHandler3() -> i32 {
 }
 
 // TukOS syscall numbers (must match kernel/src/syscall.rs).
-// NT_WRITE_FILE = 2, NT_TERMINATE_PROCESS = 3, NT_CLOSE = 4.
+// NT_WRITE_FILE = 2, NT_TERMINATE_PROCESS = 3, NT_CLOSE = 4,
+// NT_ALLOCATE_VIRTUAL_MEMORY = 5, NT_FREE_VIRTUAL_MEMORY = 6.
 
 #[unsafe(naked)]
 #[unsafe(no_mangle)]
@@ -133,6 +134,18 @@ pub extern "system" fn NtTerminateProcess() {
 #[unsafe(no_mangle)]
 pub extern "system" fn NtClose() {
     core::arch::naked_asm!("mov r10, rcx", "mov eax, 4", "syscall", "ret");
+}
+
+#[unsafe(naked)]
+#[unsafe(no_mangle)]
+pub extern "system" fn NtAllocateVirtualMemory() {
+    core::arch::naked_asm!("mov r10, rcx", "mov eax, 5", "syscall", "ret");
+}
+
+#[unsafe(naked)]
+#[unsafe(no_mangle)]
+pub extern "system" fn NtFreeVirtualMemory() {
+    core::arch::naked_asm!("mov r10, rcx", "mov eax, 6", "syscall", "ret");
 }
 
 /// `RtlExitUserProcess(code)`: a real function (NOT a bare forwarder to the

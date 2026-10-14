@@ -24,6 +24,7 @@ mod teb;
 mod trap;
 mod user_demo;
 mod usercopy;
+mod vmem;
 
 use limine::BaseRevision;
 use limine::request::{
