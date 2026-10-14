@@ -20,6 +20,8 @@ pub extern "C" fn dispatch(nr: u64, a0: u64, _a1: u64, _a2: u64, _a3: u64) -> u6
     match nr {
         SYS_WRITE_MARK => {
             LAST_MARK.store(a0, Ordering::SeqCst);
+            #[cfg(feature = "ktest")]
+            crate::ktest::on_user_mark(a0);
             0
         }
         SYS_EXIT => {

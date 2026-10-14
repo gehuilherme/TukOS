@@ -48,6 +48,8 @@ const TESTS: &[(&str, TestFn)] = &[
         address_space_drop_frees_user_frames,
     ),
     ("user_process_runs_in_ring3", user_process_runs_in_ring3),
+    // Must stay LAST: the spawned user processes never exit.
+    ("two_user_processes_preempt", two_user_processes_preempt),
 ];
 
 fn ist_stacks_installed() -> Result<(), &'static str> {
@@ -459,4 +461,38 @@ fn user_process_runs_in_ring3() -> Result<(), &'static str> {
         crate::sched::yield_now();
     }
     Err("o processo de usuario nao executou em Ring 3")
+}
+
+static USER_A_RAN: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+static USER_B_RAN: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+/// Called from the syscall dispatcher for every SYS_WRITE_MARK.
+pub fn on_user_mark(mark: u64) {
+    use core::sync::atomic::Ordering;
+    match mark {
+        0xA => {
+            USER_A_RAN.fetch_add(1, Ordering::SeqCst);
+        }
+        0xB => {
+            USER_B_RAN.fetch_add(1, Ordering::SeqCst);
+        }
+        _ => {}
+    }
+}
+
+fn two_user_processes_preempt() -> Result<(), &'static str> {
+    use core::sync::atomic::Ordering;
+    USER_A_RAN.store(0, Ordering::SeqCst);
+    USER_B_RAN.store(0, Ordering::SeqCst);
+    // Two user processes that never yield; only the timer makes both run.
+    crate::process::spawn_demo_user_pair();
+    // hlt only wakes with interrupts on; earlier tests may leave IF clear.
+    arch_x86_64::interrupts::enable();
+    for _ in 0..4000 {
+        if USER_A_RAN.load(Ordering::SeqCst) > 0 && USER_B_RAN.load(Ordering::SeqCst) > 0 {
+            return Ok(());
+        }
+        arch_x86_64::cpu::hlt();
+    }
+    Err("o timer nao preemptou os dois processos de usuario")
 }
