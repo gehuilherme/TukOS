@@ -47,6 +47,12 @@ impl Tss {
     }
 }
 
+impl Default for Tss {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Encodes a 16-byte available 64-bit TSS descriptor (type 0x9, present).
 pub const fn tss_descriptor(base: u64, limit: u32) -> [u64; 2] {
     let limit = limit as u64;
