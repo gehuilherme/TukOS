@@ -8,6 +8,7 @@ use crate::mem::space::AddressSpace;
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 use arch_x86_64::interrupts::IrqMutex;
+use core::sync::atomic::{AtomicU64, Ordering};
 
 const STACK_SIZE: usize = 64 * 1024;
 /// Fixed thread-table capacity. The table never reallocates, so the raw `save`
@@ -41,9 +42,13 @@ struct Scheduler {
     reap: Option<usize>,
 }
 
+/// Kernel PML4 root, captured in `init` before any user space exists.
+static KERNEL_CR3: AtomicU64 = AtomicU64::new(0);
+
 static SCHED: IrqMutex<Option<Scheduler>> = IrqMutex::new(None);
 
 pub fn init() {
+    KERNEL_CR3.store(crate::arch_cr3_base(), Ordering::SeqCst);
     let boot = Thread {
         rsp: 0,
         entry: None,
@@ -185,13 +190,19 @@ fn switch_to_next() {
             // never on the stack of whichever thread last entered Ring 3.
             arch_x86_64::percpu::set_kernel_rsp(target_kstack_top);
         }
-        // A kernel thread (cr3 == 0) keeps whatever PML4 is loaded (possibly a
-        // previous user space): safe because the kernel higher half is identical
-        // in every address space. Likewise rsp0/kernel_rsp are left stale for
-        // kernel threads: they stay in Ring 0 and never `syscall`.
+        // Kernel threads (cr3 == 0) explicitly load the kernel PML4, so the CPU
+        // never keeps translating through a user space that may be reaped next.
+        // rsp0/kernel_rsp are left untouched when target_kstack_top == 0: safe
+        // only because kernel threads stay in Ring 0 and the next user thread
+        // refreshes rsp0 before any Ring 3 -> 0 transition.
         let cur = crate::arch_cr3_base();
-        if target_cr3 != 0 && target_cr3 != cur {
-            arch_x86_64::cpu::write_cr3(target_cr3);
+        let target_root = if target_cr3 != 0 {
+            target_cr3
+        } else {
+            KERNEL_CR3.load(Ordering::SeqCst)
+        };
+        if target_root != 0 && target_root != cur {
+            arch_x86_64::cpu::write_cr3(target_root);
         }
     }
     unsafe { arch_x86_64::context::switch_context(save, load) };
