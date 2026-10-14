@@ -22,7 +22,7 @@ mod hw {
 
     static DISPATCH: AtomicUsize = AtomicUsize::new(0);
 
-    pub fn set_dispatch(f: extern "C" fn(u64, u64, u64, u64, u64) -> u64) {
+    pub fn set_dispatch(f: extern "C" fn(u64, u64, u64, u64, u64, u64) -> u64) {
         DISPATCH.store(f as usize, Ordering::SeqCst);
     }
 
@@ -39,13 +39,20 @@ mod hw {
 
     /// Called by the asm stub with the raw syscall arguments.
     #[unsafe(no_mangle)]
-    extern "C" fn tukos_syscall_dispatch(nr: u64, a0: u64, a1: u64, a2: u64, a3: u64) -> u64 {
+    extern "C" fn tukos_syscall_dispatch(
+        nr: u64,
+        a0: u64,
+        a1: u64,
+        a2: u64,
+        a3: u64,
+        user_rsp: u64,
+    ) -> u64 {
         let raw = DISPATCH.load(Ordering::SeqCst);
         if raw == 0 {
             return u64::MAX;
         }
-        let f: extern "C" fn(u64, u64, u64, u64, u64) -> u64 = unsafe { core::mem::transmute(raw) };
-        f(nr, a0, a1, a2, a3)
+        let f: extern "C" fn(u64, u64, u64, u64, u64, u64) -> u64 = unsafe { core::mem::transmute(raw) };
+        f(nr, a0, a1, a2, a3, user_rsp)
     }
 }
 
@@ -57,9 +64,12 @@ unsafe extern "C" {
     pub fn tukos_syscall_entry();
 }
 
-// SYSCALL entry: rcx=user RIP, r11=user RFLAGS, rax=nr, rdi,rsi,rdx,r10=a0..a3.
-// Reorder into the C ABI (rdi,rsi,rdx,rcx,r8), each register moved only after
-// its old value has been read: r8<-r10, rcx<-rdx, rdx<-rsi, rsi<-rdi, rdi<-rax.
+// SYSCALL entry (Windows x64 syscall ABI): rcx=user RIP, r11=user RFLAGS,
+// eax=nr, r10,rdx,r8,r9 = a0..a3 (ntdll copies rcx->r10). C ABI target:
+// dispatch(rdi=nr, rsi=a0, rdx=a1, rcx=a2, r8=a3, r9=user_rsp). Each register is
+// overwritten only after its old value was read: rsi<-r10, rdi<-rax, rcx<-r8
+// (a2, before r8 changes), r8<-r9 (a3, before r9 changes), r9<-saved user rsp.
+// rdx (a1) is already in place.
 #[cfg(target_os = "none")]
 core::arch::global_asm!(
     r#"
@@ -72,11 +82,11 @@ tukos_syscall_entry:
     and rsp, -16
     push rcx
     push r11
-    mov r8,  r10
-    mov rcx, rdx
-    mov rdx, rsi
-    mov rsi, rdi
+    mov rsi, r10
     mov rdi, rax
+    mov rcx, r8
+    mov r8,  r9
+    mov r9,  gs:[{off_user_rsp}]
     call tukos_syscall_dispatch
     pop r11
     pop rcx

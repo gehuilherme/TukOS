@@ -9,6 +9,8 @@ pub const SYS_WRITE_MARK: u64 = 1;
 
 pub const NT_WRITE_FILE: u64 = 2;
 pub const NT_TERMINATE_PROCESS: u64 = 3;
+#[cfg(feature = "ktest")]
+pub const SYS_SUM6: u64 = 100;
 pub const STATUS_SUCCESS: u64 = 0;
 pub const STATUS_ACCESS_VIOLATION: u64 = 0xC000_0005;
 
@@ -33,7 +35,22 @@ pub fn init() {
     };
 }
 
-pub extern "C" fn dispatch(nr: u64, a0: u64, a1: u64, a2: u64, _a3: u64) -> u64 {
+/// Reads stack argument `index` (0-based beyond the 4 register args) of a
+/// Windows x64 syscall: `[user_rsp + 0x28 + index*8]` (return slot + 32-byte shadow).
+pub fn stack_arg(user_rsp: u64, index: u64) -> Option<u64> {
+    let addr = user_rsp.checked_add(0x28)?.checked_add(index.checked_mul(8)?)?;
+    let bytes = crate::usercopy::copy_from_user(addr, 8)?;
+    Some(u64::from_le_bytes(bytes.as_slice().try_into().ok()?))
+}
+
+pub extern "C" fn dispatch(
+    nr: u64,
+    a0: u64,
+    a1: u64,
+    a2: u64,
+    _a3: u64,
+    _user_rsp: u64,
+) -> u64 {
     match nr {
         SYS_WRITE_MARK => {
             LAST_MARK.store(a0, Ordering::SeqCst);
@@ -83,6 +100,20 @@ pub extern "C" fn dispatch(nr: u64, a0: u64, a1: u64, a2: u64, _a3: u64) -> u64 
             #[cfg(not(target_os = "none"))]
             a0
         }
+        #[cfg(feature = "ktest")]
+        SYS_SUM6 => match (stack_arg(_user_rsp, 0), stack_arg(_user_rsp, 1)) {
+            (Some(s0), Some(s1)) => {
+                let sum = a0
+                    .wrapping_add(a1)
+                    .wrapping_add(a2)
+                    .wrapping_add(_a3)
+                    .wrapping_add(s0)
+                    .wrapping_add(s1);
+                LAST_MARK.store(sum, Ordering::SeqCst);
+                0
+            }
+            _ => STATUS_ACCESS_VIOLATION,
+        },
         _ => u64::MAX,
     }
 }

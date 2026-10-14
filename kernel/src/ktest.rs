@@ -82,7 +82,43 @@ const TESTS: &[(&str, TestFn)] = &[
         "load_pe_rejects_malformed_without_panic",
         load_pe_rejects_malformed_without_panic,
     ),
+    (
+        "syscall_reads_six_args_reg_and_stack",
+        syscall_reads_six_args_reg_and_stack,
+    ),
+    (
+        "stack_args_rejected_when_user_rsp_bad",
+        stack_args_rejected_when_user_rsp_bad,
+    ),
 ];
+
+fn syscall_reads_six_args_reg_and_stack() -> Result<(), &'static str> {
+    use core::sync::atomic::Ordering;
+    crate::syscall::LAST_MARK.store(0, Ordering::SeqCst);
+    crate::process::spawn_sum6_pe(); // SYS_SUM6 with args 1..=6 (4 reg + 2 stack)
+    for _ in 0..8000 {
+        crate::sched::yield_now();
+        let v = crate::syscall::LAST_MARK.load(Ordering::SeqCst);
+        if v != 0 {
+            return if v == 21 {
+                Ok(())
+            } else {
+                Err("soma de 6 args (4 reg + 2 pilha) incorreta")
+            };
+        }
+    }
+    Err("SYS_SUM6 nao executou")
+}
+
+fn stack_args_rejected_when_user_rsp_bad() -> Result<(), &'static str> {
+    if crate::syscall::stack_arg(0xffff_ff80_0000_0000, 0).is_some() {
+        return Err("stack_arg aceitou rsp de kernel");
+    }
+    if crate::syscall::stack_arg(0x0000_0000_7777_0000, 0).is_some() {
+        return Err("stack_arg aceitou rsp nao mapeado");
+    }
+    Ok(())
+}
 
 fn translate_user_requires_user_bit() -> Result<(), &'static str> {
     use crate::mem::space::AddressSpace;
@@ -465,7 +501,7 @@ fn syscall_dispatch_records_mark() -> Result<(), &'static str> {
     // Call the dispatch function directly (no privilege change): proves the
     // table wiring and SYS_WRITE_MARK semantics independent of the asm stub.
     crate::syscall::LAST_MARK.store(0, Ordering::SeqCst);
-    let r = crate::syscall::dispatch(crate::syscall::SYS_WRITE_MARK, 0xCAFE, 0, 0, 0);
+    let r = crate::syscall::dispatch(crate::syscall::SYS_WRITE_MARK, 0xCAFE, 0, 0, 0, 0);
     if r != 0 {
         return Err("SYS_WRITE_MARK deveria retornar 0");
     }

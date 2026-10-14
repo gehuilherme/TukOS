@@ -14,10 +14,10 @@ core::arch::global_asm!(
 .global tukos_user_payload_end
 tukos_user_payload:
     mov rax, 1          // SYS_WRITE_MARK
-    mov rdi, 0xCAFE     // mark argument
+    mov r10, 0xCAFE     // mark argument
     syscall
     mov rax, 0          // SYS_EXIT
-    mov rdi, 0x2A       // exit code
+    mov r10, 0x2A       // exit code
     syscall
     ud2                 // unreachable: SYS_EXIT does not return to user
 tukos_user_payload_end:
