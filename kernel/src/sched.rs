@@ -4,6 +4,7 @@
 
 extern crate alloc;
 
+use crate::mem::space::AddressSpace;
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 use arch_x86_64::interrupts::IrqMutex;
@@ -12,6 +13,12 @@ const STACK_SIZE: usize = 64 * 1024;
 /// Fixed thread-table capacity. The table never reallocates, so the raw `save`
 /// pointer handed to `switch_context` stays valid.
 const MAX_THREADS: usize = 64;
+
+#[derive(PartialEq)]
+enum ThreadState {
+    Ready,
+    Exited,
+}
 
 struct Thread {
     rsp: u64,
@@ -22,11 +29,16 @@ struct Thread {
     cr3: u64,
     /// Top of the kernel stack used for Ring 3 -> 0 transitions; 0 = leave rsp0 alone.
     kstack_top: u64,
+    state: ThreadState,
+    /// Owned address space of a user thread; None for kernel threads.
+    space: Option<AddressSpace>,
 }
 
 struct Scheduler {
     threads: Vec<Thread>,
     current: usize,
+    /// Index of an Exited thread whose resources are not yet released.
+    reap: Option<usize>,
 }
 
 static SCHED: IrqMutex<Option<Scheduler>> = IrqMutex::new(None);
@@ -38,12 +50,15 @@ pub fn init() {
         _stack: None,
         cr3: 0,
         kstack_top: 0,
+        state: ThreadState::Ready,
+        space: None,
     };
     let mut threads = Vec::with_capacity(MAX_THREADS);
     threads.push(boot);
     *SCHED.lock() = Some(Scheduler {
         threads,
         current: 0,
+        reap: None,
     });
 }
 
@@ -90,18 +105,21 @@ pub fn spawn(entry: fn()) -> usize {
         _stack: Some(stack),
         cr3: 0,
         kstack_top: 0,
+        state: ThreadState::Ready,
+        space: None,
     });
     s.threads.len() - 1
 }
 
 /// Spawns a thread whose first run drops to Ring 3 at `entry` with stack
-/// `user_stack_top`, in the address space rooted at `space_root`.
+/// `user_stack_top`, in `space`, which the thread now owns (freed on exit).
 pub fn spawn_user(
-    space_root: u64,
+    space: AddressSpace,
     entry: u64,
     user_stack_top: u64,
     mut kstack: Box<[u8]>,
 ) -> usize {
+    let space_root = space.root();
     let top = (kstack.as_mut_ptr() as u64 + kstack.len() as u64) & !0xF;
     // Low -> high: 6 callee-saved zeros, tukos_user_entry, then the iretq frame
     // (rip, cs, rflags, rsp, ss).
@@ -131,6 +149,8 @@ pub fn spawn_user(
         _stack: Some(kstack),
         cr3: space_root,
         kstack_top: top,
+        state: ThreadState::Ready,
+        space: Some(space),
     });
     s.threads.len() - 1
 }
@@ -145,7 +165,14 @@ fn switch_to_next() {
             return;
         }
         let from = s.current;
-        let to = (from + 1) % s.threads.len();
+        let n = s.threads.len();
+        let mut to = (from + 1) % n;
+        while s.threads[to].state == ThreadState::Exited && to != from {
+            to = (to + 1) % n;
+        }
+        if to == from && s.threads[from].state == ThreadState::Exited {
+            panic!("sched: nenhuma thread viva");
+        }
         s.current = to;
         let save = &mut s.threads[from].rsp as *mut u64;
         let load = s.threads[to].rsp;
@@ -168,6 +195,48 @@ fn switch_to_next() {
         }
     }
     unsafe { arch_x86_64::context::switch_context(save, load) };
+    reap_pending();
+}
+
+/// Releases the resources of a pending Exited thread. Runs on the stack of the
+/// thread that was switched to, never on the stack being freed. Interrupts are
+/// disabled by the callers of `switch_to_next`.
+fn reap_pending() {
+    let taken = {
+        let mut guard = SCHED.lock();
+        let Some(s) = guard.as_mut() else { return };
+        s.reap
+            .take()
+            .map(|idx| (s.threads[idx].space.take(), s.threads[idx]._stack.take()))
+    };
+    // Dropped outside the SCHED lock: AddressSpace::drop takes the frames lock.
+    if let Some((space, stack)) = taken {
+        drop(space);
+        drop(stack);
+    }
+}
+
+/// Terminates the current (user) thread: marks it Exited and switches away; its
+/// space and kernel stack are released by the reaper on the next thread's stack.
+pub fn exit_current() -> ! {
+    arch_x86_64::interrupts::disable();
+    {
+        let mut guard = SCHED.lock();
+        let s = guard.as_mut().expect("scheduler nao iniciado");
+        let cur = s.current;
+        s.threads[cur].state = ThreadState::Exited;
+        s.reap = Some(cur);
+    }
+    switch_to_next();
+    unreachable!("thread Exited foi reescalonada");
+}
+
+/// True if the current thread owns a user address space.
+pub fn current_is_user() -> bool {
+    let guard = SCHED.lock();
+    guard
+        .as_ref()
+        .is_some_and(|s| s.threads[s.current].space.is_some())
 }
 
 pub fn yield_now() {

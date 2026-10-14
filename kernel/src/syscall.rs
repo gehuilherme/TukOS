@@ -25,6 +25,9 @@ pub extern "C" fn dispatch(nr: u64, a0: u64, _a1: u64, _a2: u64, _a3: u64) -> u6
             0
         }
         SYS_EXIT => {
+            if crate::sched::current_is_user() {
+                crate::sched::exit_current();
+            }
             #[cfg(target_os = "none")]
             unsafe {
                 arch_x86_64::usermode::exit_to_kernel(a0)

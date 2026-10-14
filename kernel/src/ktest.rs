@@ -49,6 +49,10 @@ const TESTS: &[(&str, TestFn)] = &[
     ),
     ("user_process_runs_in_ring3", user_process_runs_in_ring3),
     // Must stay LAST: the spawned user processes never exit.
+    (
+        "user_process_exits_and_is_reaped",
+        user_process_exits_and_is_reaped,
+    ),
     ("two_user_processes_preempt", two_user_processes_preempt),
 ];
 
@@ -478,6 +482,20 @@ pub fn on_user_mark(mark: u64) {
         }
         _ => {}
     }
+}
+
+fn user_process_exits_and_is_reaped() -> Result<(), &'static str> {
+    let before = crate::mem::frames::free_frame_count();
+    // Spawn a user process whose payload does SYS_EXIT immediately.
+    crate::process::spawn_exiting_user();
+    // Yield until it has run, exited and been reaped (its space+stacks freed).
+    for _ in 0..4000 {
+        crate::sched::yield_now();
+        if crate::mem::frames::free_frame_count() == before {
+            return Ok(());
+        }
+    }
+    Err("processo de usuario nao foi recolhido (frames nao voltaram)")
 }
 
 fn two_user_processes_preempt() -> Result<(), &'static str> {

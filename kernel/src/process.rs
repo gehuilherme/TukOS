@@ -1,5 +1,5 @@
 //! A user process: an address space plus (for now) a single user thread.
-//! No process exit yet, so the address space is intentionally leaked.
+//! The thread owns its address space; both are released when it exits.
 
 extern crate alloc;
 
@@ -46,6 +46,15 @@ tukos_demo_user_b:
     syscall
     jmp 1b
 tukos_demo_user_b_end:
+
+.global tukos_exiting_user
+.global tukos_exiting_user_end
+tukos_exiting_user:
+    mov rax, 0          // SYS_EXIT
+    mov rdi, 0
+    syscall
+    ud2
+tukos_exiting_user_end:
 "#
 );
 
@@ -56,6 +65,8 @@ unsafe extern "C" {
     static tukos_demo_user_a_end: u8;
     static tukos_demo_user_b: u8;
     static tukos_demo_user_b_end: u8;
+    static tukos_exiting_user: u8;
+    static tukos_exiting_user_end: u8;
 }
 
 fn payload(start: *const u8, end: *const u8) -> &'static [u8] {
@@ -79,6 +90,14 @@ fn demo_payload_b() -> &'static [u8] {
         &raw const tukos_demo_user_b,
         &raw const tukos_demo_user_b_end,
     )
+}
+
+/// Creates a user process that immediately calls SYS_EXIT.
+pub fn spawn_exiting_user() -> usize {
+    spawn_payload(payload(
+        &raw const tukos_exiting_user,
+        &raw const tukos_exiting_user_end,
+    ))
 }
 
 /// Creates a user process running the 0xBEEF demo payload.
@@ -122,8 +141,5 @@ fn spawn_payload(bytes: &[u8]) -> usize {
     }
 
     let kstack = alloc::vec![0u8; KSTACK_SIZE].into_boxed_slice();
-    let root = space.root();
-    // Leak the address space: no process teardown in this plan.
-    core::mem::forget(space);
-    crate::sched::spawn_user(root, USER_CODE_VA, USER_STACK_TOP, kstack)
+    crate::sched::spawn_user(space, USER_CODE_VA, USER_STACK_TOP, kstack)
 }
