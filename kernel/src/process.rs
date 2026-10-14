@@ -306,6 +306,18 @@ pub fn build_import_pe(func: &str, iat_writable: bool) -> alloc::vec::Vec<u8> {
     pe
 }
 
+/// Reproducer (Plan 14, temporary): a PE whose entry derefs unmapped user VA 0x1
+/// (`mov rax, [0x1]`), i.e. a deterministic Ring-3 #PF.
+#[cfg(feature = "repro-user-fault")]
+pub fn spawn_faulting_pe() -> usize {
+    const TEXT: [u8; 10] = [
+        0x48, 0x8B, 0x04, 0x25, 0x01, 0x00, 0x00, 0x00, // mov rax, [0x1]
+        0x0F, 0x0B, // ud2 (never reached)
+    ];
+    let pe = build_pe(0x1000, &TEXT, TEXT.len() as u32, SCN_CODE_EXEC_READ);
+    spawn_pe(&pe, PE_IMAGE_BASE)
+}
+
 /// The embedded test PE bytes (built once per call and leaked; test use only).
 pub fn test_pe_bytes() -> &'static [u8] {
     build_test_pe().leak()

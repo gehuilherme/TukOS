@@ -142,7 +142,27 @@ const TESTS: &[(&str, TestFn)] = &[
     ("valloc_basic", valloc_basic),
     ("valloc_rejects_overlap", valloc_rejects_overlap),
     ("valloc_rejects_kernel_range", valloc_rejects_kernel_range),
+    // Plan 14: gated reproducer; must stay LAST (panics the kernel today).
+    (
+        "user_fault_terminates_not_panics",
+        user_fault_terminates_not_panics,
+    ),
 ];
+
+/// Without `repro-user-fault` this is a no-op. With it, a Ring-3 thread takes a
+/// #PF; today `trap::handle` panics the kernel (docs/observations/2026-10-14-...).
+fn user_fault_terminates_not_panics() -> Result<(), &'static str> {
+    #[cfg(feature = "repro-user-fault")]
+    {
+        crate::process::spawn_faulting_pe();
+        for _ in 0..8000 {
+            crate::sched::yield_now();
+        }
+        Err("fault de usuario nao foi tratado nem panicou")
+    }
+    #[cfg(not(feature = "repro-user-fault"))]
+    Ok(())
+}
 
 fn ntdll_embedded_parses() -> Result<(), &'static str> {
     let bytes = crate::ntdll_image::NTDLL_BYTES;
