@@ -158,7 +158,9 @@ pub fn run_captured(esp: &Path, timeout: Duration) -> crate::Result<(Outcome, St
     let mut child = Command::new(&qemu)
         .args(base_args(&ovmf, esp))
         .args(["-monitor", "none"])
-        .args(display_args())
+        // Tests (ktest/conformance) always run headless so they never pop a
+        // window on the user's monitor; only `cargo xtask run` is windowed.
+        .args(["-display", "none"])
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit())
         .spawn()
