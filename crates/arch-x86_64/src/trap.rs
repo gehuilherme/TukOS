@@ -72,6 +72,12 @@ tukos_isr_255:
     jmp tukos_isr_common
 
 tukos_isr_common:
+    // Conditional swapgs on entry: swap only if we came from Ring 3 (CS RPL == 3).
+    // At this point rsp -> vector; CPU-pushed CS is at [rsp+24].
+    test byte ptr [rsp+24], 3
+    jz 3f
+    swapgs
+3:
     push rax
     push rbx
     push rcx
@@ -106,6 +112,11 @@ tukos_isr_common:
     pop rbx
     pop rax
     add rsp, 16
+    // Conditional swapgs on exit: swap back only if returning to Ring 3.
+    test byte ptr [rsp+8], 3
+    jz 4f
+    swapgs
+4:
     iretq
 
 .section .rodata

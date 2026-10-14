@@ -38,6 +38,7 @@ const TESTS: &[(&str, TestFn)] = &[
         "syscall_dispatch_records_mark",
         syscall_dispatch_records_mark,
     ),
+    ("ring0_exception_keeps_gs", ring0_exception_keeps_gs),
 ];
 
 fn ist_stacks_installed() -> Result<(), &'static str> {
@@ -194,6 +195,18 @@ fn breakpoint_returns() -> Result<(), &'static str> {
     } else {
         Err("handler de breakpoint nao contou a excecao")
     }
+}
+
+fn ring0_exception_keeps_gs() -> Result<(), &'static str> {
+    // A Ring 0 exception (int3) must NOT swapgs: the kernel GS base must be
+    // unchanged across it. (The conditional swapgs only fires for RPL 3.)
+    let before = arch_x86_64::percpu::gs_base();
+    arch_x86_64::cpu::int3();
+    let after = arch_x86_64::percpu::gs_base();
+    if before != after {
+        return Err("excecao em Ring 0 trocou o GS indevidamente");
+    }
+    Ok(())
 }
 
 fn limine_base_revision_supported() -> Result<(), &'static str> {
