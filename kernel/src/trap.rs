@@ -43,10 +43,20 @@ const NAMES: [&str; 32] = [
 ];
 
 pub fn exception_name(vector: u64) -> &'static str {
+    if vector >= 32 {
+        return "IRQ";
+    }
     NAMES.get(vector as usize).copied().unwrap_or("UNKNOWN")
 }
 
 pub fn handle(frame: &mut TrapFrame) {
+    if frame.vector == arch_x86_64::lapic::TIMER_VECTOR as u64 {
+        crate::apic::on_timer();
+        return;
+    }
+    if frame.vector == arch_x86_64::lapic::SPURIOUS_VECTOR as u64 {
+        return; // spurious: no EOI per SDM 11.9
+    }
     if frame.vector == BREAKPOINT {
         BREAKPOINTS.fetch_add(1, Ordering::SeqCst);
         return;

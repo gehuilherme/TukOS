@@ -57,7 +57,7 @@ tukos_isr_\n:
     jmp tukos_isr_common
 .endm
 
-.irp n, 0,1,2,3,4,5,6,7,9,15,16,18,19,20,22,23,24,25,26,27,28,31
+.irp n, 0,1,2,3,4,5,6,7,9,15,16,18,19,20,22,23,24,25,26,27,28,31,32,33,34,35,36,37,38,39,40,41,42,43,44,45,46,47
     TUKOS_ISR_NOERR \n
 .endr
 .irp n, 8,10,11,12,13,14,17,21,29,30
@@ -105,7 +105,7 @@ tukos_isr_common:
 .balign 8
 .global tukos_isr_table
 tukos_isr_table:
-.irp n, 0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31
+.irp n, 0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,41,42,43,44,45,46,47
     .quad tukos_isr_\n
 .endr
 .section .text
@@ -114,8 +114,8 @@ tukos_isr_table:
 
 #[cfg(target_os = "none")]
 unsafe extern "C" {
-    /// Entry stub addresses for vectors 0..32, defined in the assembly above.
-    pub static tukos_isr_table: [u64; 32];
+    /// Entry stub addresses for vectors 0..48, defined in the assembly above.
+    pub static tukos_isr_table: [u64; 48];
 }
 
 /// Called by `tukos_isr_common` with a pointer to the saved frame.

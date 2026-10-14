@@ -19,6 +19,7 @@ const TESTS: &[(&str, TestFn)] = &[
     ("map_creates_missing_tables", map_creates_missing_tables),
     ("heap_box_and_vec", heap_box_and_vec),
     ("ist_stacks_installed", ist_stacks_installed),
+    ("timer_ticks_advance", timer_ticks_advance),
 ];
 
 fn ist_stacks_installed() -> Result<(), &'static str> {
@@ -227,4 +228,17 @@ fn fbcon_draws_glyph() -> Result<(), &'static str> {
     }
     con.clear();
     Ok(())
+}
+
+fn timer_ticks_advance() -> Result<(), &'static str> {
+    use core::sync::atomic::Ordering;
+    let start = crate::apic::TICKS.load(Ordering::SeqCst);
+    // Wait for several ticks; hlt sleeps until the next interrupt.
+    for _ in 0..1000 {
+        if crate::apic::TICKS.load(Ordering::SeqCst) >= start + 5 {
+            return Ok(());
+        }
+        arch_x86_64::cpu::hlt();
+    }
+    Err("timer nao avancou 5 ticks")
 }

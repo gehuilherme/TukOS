@@ -1,6 +1,7 @@
 #![no_std]
 #![no_main]
 
+mod apic;
 #[macro_use]
 mod console;
 mod fbcon;
@@ -64,6 +65,12 @@ unsafe extern "C" fn kmain() -> ! {
 
     mem::init();
     kprintln!("memoria: {} frames livres", mem::frames::free_frame_count());
+    apic::init();
+    arch_x86_64::interrupts::enable();
+    kprintln!(
+        "interrupcoes ligadas (timer no vetor {})",
+        arch_x86_64::lapic::TIMER_VECTOR
+    );
 
     kprintln!("TukOS pronto");
 

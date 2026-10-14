@@ -107,3 +107,23 @@ pub fn read_rflags() -> u64 {
     unsafe { asm!("pushfq", "pop {}", out(reg) v, options(nomem, preserves_flags)) };
     v
 }
+
+/// # Safety
+/// `msr` must be a valid MSR for this CPU.
+#[inline]
+pub unsafe fn read_msr(msr: u32) -> u64 {
+    let (lo, hi): (u32, u32);
+    unsafe {
+        asm!("rdmsr", in("ecx") msr, out("eax") lo, out("edx") hi, options(nomem, nostack, preserves_flags))
+    };
+    ((hi as u64) << 32) | lo as u64
+}
+
+/// # Safety
+/// `msr` must be a valid, writable MSR and `value` legal for it.
+#[inline]
+pub unsafe fn write_msr(msr: u32, value: u64) {
+    unsafe {
+        asm!("wrmsr", in("ecx") msr, in("eax") value as u32, in("edx") (value >> 32) as u32, options(nostack, preserves_flags))
+    };
+}

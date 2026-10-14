@@ -27,6 +27,7 @@ impl PageFlags {
     pub const WRITABLE: PageFlags = PageFlags(1 << 1);
     pub const USER: PageFlags = PageFlags(1 << 2);
     pub const HUGE: PageFlags = PageFlags(1 << 7);
+    pub const CACHE_DISABLE: PageFlags = PageFlags(1 << 4);
     pub const NO_EXECUTE: PageFlags = PageFlags(1 << 63);
 
     pub const fn empty() -> PageFlags {
@@ -64,6 +65,11 @@ pub fn entry_present(entry: u64) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn cache_disable_is_bit_4() {
+        assert_eq!(PageFlags::CACHE_DISABLE.bits(), 1 << 4);
+    }
+
     use super::*;
 
     #[test]
