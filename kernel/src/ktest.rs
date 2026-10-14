@@ -39,6 +39,14 @@ const TESTS: &[(&str, TestFn)] = &[
         syscall_dispatch_records_mark,
     ),
     ("ring0_exception_keeps_gs", ring0_exception_keeps_gs),
+    (
+        "kernel_mapped_in_new_address_space",
+        kernel_mapped_in_new_address_space,
+    ),
+    (
+        "address_space_drop_frees_user_frames",
+        address_space_drop_frees_user_frames,
+    ),
 ];
 
 fn ist_stacks_installed() -> Result<(), &'static str> {
@@ -390,6 +398,49 @@ fn syscall_roundtrip_preserves_gs() -> Result<(), &'static str> {
     let _ = crate::user_demo::run();
     if arch_x86_64::percpu::gs_base() != before {
         return Err("GS base do kernel mudou apos a excursao (swapgs desbalanceado)");
+    }
+    Ok(())
+}
+
+fn kernel_mapped_in_new_address_space() -> Result<(), &'static str> {
+    use mm::paging::PageFlags;
+    let space = crate::mem::space::AddressSpace::new_user();
+    // A kernel higher-half address (the heap window) must resolve in the new space
+    // to the same physical frame as in the active space.
+    let probe = 0xffff_ff80_0000_0000u64; // heap window base (mapped by the heap)
+    let active = crate::mem::paging::translate(probe);
+    let in_new = crate::mem::paging::translate_in(space.root(), probe);
+    if active.is_none() {
+        return Err("endereco de prova nao mapeado no espaco ativo");
+    }
+    if in_new != active {
+        return Err("metade alta do kernel nao foi clonada no novo espaco");
+    }
+    // A low (user) address must be unmapped in the fresh space.
+    if crate::mem::paging::translate_in(space.root(), 0x40_0000).is_some() {
+        return Err("metade baixa deveria estar vazia");
+    }
+    let _ = PageFlags::USER;
+    Ok(())
+}
+
+fn address_space_drop_frees_user_frames() -> Result<(), &'static str> {
+    use mm::paging::PageFlags;
+    let before = crate::mem::frames::free_frame_count();
+    {
+        let space = crate::mem::space::AddressSpace::new_user();
+        let frame = crate::mem::frames::alloc_frame().ok_or("sem frame")?;
+        unsafe {
+            space
+                .map(0x40_0000, frame, PageFlags::USER.union(PageFlags::WRITABLE))
+                .map_err(|_| "map no espaco novo falhou")?;
+        }
+        // Dropping `space` must free: the mapped user frame, the intermediate
+        // tables, and the PML4 — leaving the count where it started.
+    }
+    let after = crate::mem::frames::free_frame_count();
+    if after != before {
+        return Err("Drop do AddressSpace nao liberou todos os frames de usuario");
     }
     Ok(())
 }

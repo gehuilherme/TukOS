@@ -3,6 +3,7 @@
 pub mod frames;
 pub mod heap;
 pub mod paging;
+pub mod space;
 
 /// Reads the Limine HHDM and memory-map responses and brings up the frame allocator.
 pub fn init() {

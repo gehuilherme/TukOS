@@ -44,11 +44,16 @@ unsafe fn next_table(table: *mut u64, index: usize, create: bool) -> Result<Opti
 }
 
 /// # Safety
-/// Modifies the active page tables; `virt` must be a page-aligned address not in
-/// active use by the kernel, and `phys` a valid frame.
-pub unsafe fn map_page(virt: u64, phys: u64, flags: PageFlags) -> Result<(), MapError> {
+/// Modifies the page tables rooted at `root`; `virt` must be a page-aligned address
+/// not in active use by the kernel, and `phys` a valid frame.
+pub unsafe fn map_page_in(
+    root: u64,
+    virt: u64,
+    phys: u64,
+    flags: PageFlags,
+) -> Result<(), MapError> {
     let idx = page_table_indices(virt);
-    let mut table = table_mut(crate::arch_cr3_base());
+    let mut table = table_mut(root);
     for &i in &idx[..3] {
         let next = unsafe { next_table(table, i, true)?.ok_or(MapError::AllocFailed)? };
         table = table_mut(next);
@@ -59,16 +64,19 @@ pub unsafe fn map_page(virt: u64, phys: u64, flags: PageFlags) -> Result<(), Map
     }
     unsafe {
         core::ptr::write_volatile(slot, make_entry(phys, flags.union(PageFlags::PRESENT)));
-        arch_x86_64::cpu::invlpg(virt);
+        // Only the active space can have TLB entries.
+        if root == crate::arch_cr3_base() {
+            arch_x86_64::cpu::invlpg(virt);
+        }
     }
     Ok(())
 }
 
 /// # Safety
-/// Modifies the active page tables; `virt` must be a mapped page-aligned address.
-pub unsafe fn unmap_page(virt: u64) -> Result<(), MapError> {
+/// Modifies the page tables rooted at `root`; `virt` must be a mapped page-aligned address.
+pub unsafe fn unmap_page_in(root: u64, virt: u64) -> Result<(), MapError> {
     let idx = page_table_indices(virt);
-    let mut table = table_mut(crate::arch_cr3_base());
+    let mut table = table_mut(root);
     for &i in &idx[..3] {
         match unsafe { next_table(table, i, false)? } {
             Some(next) => table = table_mut(next),
@@ -81,14 +89,16 @@ pub unsafe fn unmap_page(virt: u64) -> Result<(), MapError> {
     }
     unsafe {
         core::ptr::write_volatile(slot, 0);
-        arch_x86_64::cpu::invlpg(virt);
+        if root == crate::arch_cr3_base() {
+            arch_x86_64::cpu::invlpg(virt);
+        }
     }
     Ok(())
 }
 
-pub fn translate(virt: u64) -> Option<u64> {
+pub fn translate_in(root: u64, virt: u64) -> Option<u64> {
     let idx = page_table_indices(virt);
-    let mut table = table_mut(crate::arch_cr3_base());
+    let mut table = table_mut(root);
     for &i in &idx[..3] {
         let entry = unsafe { core::ptr::read_volatile(table.add(i)) };
         if !entry_present(entry) {
@@ -102,4 +112,20 @@ pub fn translate(virt: u64) -> Option<u64> {
     } else {
         None
     }
+}
+
+/// # Safety
+/// Modifies the active page tables; see [`map_page_in`].
+pub unsafe fn map_page(virt: u64, phys: u64, flags: PageFlags) -> Result<(), MapError> {
+    unsafe { map_page_in(crate::arch_cr3_base(), virt, phys, flags) }
+}
+
+/// # Safety
+/// Modifies the active page tables; see [`unmap_page_in`].
+pub unsafe fn unmap_page(virt: u64) -> Result<(), MapError> {
+    unsafe { unmap_page_in(crate::arch_cr3_base(), virt) }
+}
+
+pub fn translate(virt: u64) -> Option<u64> {
+    translate_in(crate::arch_cr3_base(), virt)
 }
