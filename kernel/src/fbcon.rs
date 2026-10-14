@@ -58,7 +58,10 @@ impl FbCon {
         let glyph = get_raster(c, WEIGHT, HEIGHT)
             .or_else(|| get_raster('?', WEIGHT, HEIGHT))
             .expect("'?' existe na fonte");
-        let (x0, y0) = (self.col * Self::cell_width(), self.row * Self::cell_height());
+        let (x0, y0) = (
+            self.col * Self::cell_width(),
+            self.row * Self::cell_height(),
+        );
         for (y, line) in glyph.raster().iter().enumerate() {
             for (x, &v) in line.iter().enumerate() {
                 self.put_pixel(x0 + x, y0 + y, v);
@@ -109,8 +112,12 @@ impl fmt::Write for FbCon {
 }
 
 pub fn init_from_limine() {
-    let Some(resp) = crate::FRAMEBUFFER_REQUEST.get_response() else { return };
-    let Some(fb) = resp.framebuffers().next() else { return };
+    let Some(resp) = crate::FRAMEBUFFER_REQUEST.get_response() else {
+        return;
+    };
+    let Some(fb) = resp.framebuffers().next() else {
+        return;
+    };
     if fb.bpp() != 32 {
         return;
     }

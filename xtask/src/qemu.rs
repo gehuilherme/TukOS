@@ -60,7 +60,9 @@ pub fn find_qemu() -> crate::Result<PathBuf> {
     if on_path {
         return Ok(PathBuf::from("qemu-system-x86_64"));
     }
-    let candidates = vec![PathBuf::from(r"C:\Program Files\qemu\qemu-system-x86_64.exe")];
+    let candidates = vec![PathBuf::from(
+        r"C:\Program Files\qemu\qemu-system-x86_64.exe",
+    )];
     first_existing(&candidates).ok_or_else(|| {
         let mut tried = vec![PathBuf::from("qemu-system-x86_64 (PATH)")];
         tried.extend(candidates);
@@ -89,7 +91,10 @@ pub fn find_ovmf(qemu: &Path) -> crate::Result<PathBuf> {
     first_existing(&candidates).ok_or_else(|| missing_message("OVMF", &candidates, OVMF_HINT))
 }
 
-pub fn wait_with_timeout(child: &mut Child, timeout: Duration) -> std::io::Result<Option<ExitStatus>> {
+pub fn wait_with_timeout(
+    child: &mut Child,
+    timeout: Duration,
+) -> std::io::Result<Option<ExitStatus>> {
     let start = Instant::now();
     loop {
         if let Some(status) = child.try_wait()? {
@@ -153,7 +158,10 @@ pub fn run_captured(esp: &Path, timeout: Duration) -> crate::Result<(Outcome, St
         .stderr(Stdio::inherit())
         .spawn()
         .map_err(|e| format!("falha ao iniciar {}: {e}", qemu.display()))?;
-    let mut stdout = child.stdout.take().expect("stdout foi configurado como piped");
+    let mut stdout = child
+        .stdout
+        .take()
+        .expect("stdout foi configurado como piped");
     let reader = std::thread::spawn(move || {
         let mut buf = Vec::new();
         let _ = stdout.read_to_end(&mut buf);
@@ -177,7 +185,11 @@ mod tests {
     fn sleeper(secs: u32) -> Command {
         if cfg!(windows) {
             let mut c = Command::new("powershell");
-            c.args(["-NoProfile", "-Command", &format!("Start-Sleep -Seconds {secs}")]);
+            c.args([
+                "-NoProfile",
+                "-Command",
+                &format!("Start-Sleep -Seconds {secs}"),
+            ]);
             c
         } else {
             let mut c = Command::new("sleep");
@@ -207,7 +219,10 @@ mod tests {
     fn first_existing_picks_first_present_path() {
         let present = std::env::current_exe().unwrap();
         let missing = PathBuf::from("/definitely/not/here/qemu");
-        assert_eq!(first_existing(&[missing.clone(), present.clone()]), Some(present));
+        assert_eq!(
+            first_existing(&[missing.clone(), present.clone()]),
+            Some(present)
+        );
         assert_eq!(first_existing(&[missing]), None);
     }
 

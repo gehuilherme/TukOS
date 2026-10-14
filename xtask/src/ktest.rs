@@ -53,27 +53,46 @@ pub fn check_ktest(outcome: Outcome, report: &Report) -> crate::Result<()> {
         return Err("timeout: o kernel não terminou os autotestes".into());
     }
     let Some((passed, failed)) = report.done else {
-        return Err(format!("marcador KTEST-DONE ausente (resultado do QEMU: {outcome:?})"));
+        return Err(format!(
+            "marcador KTEST-DONE ausente (resultado do QEMU: {outcome:?})"
+        ));
     };
     if failed > 0 || !report.failed.is_empty() {
-        let names: Vec<_> = report.failed.iter().map(|(n, why)| format!("{n} ({why})")).collect();
-        return Err(format!("{failed} autoteste(s) falharam: {}", names.join(", ")));
+        let names: Vec<_> = report
+            .failed
+            .iter()
+            .map(|(n, why)| format!("{n} ({why})"))
+            .collect();
+        return Err(format!(
+            "{failed} autoteste(s) falharam: {}",
+            names.join(", ")
+        ));
     }
     if passed == 0 {
         return Err("nenhum autoteste foi executado".into());
     }
     if outcome != Outcome::Success {
-        return Err(format!("QEMU terminou com {outcome:?} apesar de todos os testes passarem"));
+        return Err(format!(
+            "QEMU terminou com {outcome:?} apesar de todos os testes passarem"
+        ));
     }
     Ok(())
 }
 
-pub fn check_expected_panic(outcome: Outcome, report: &Report, must_contain: &[&str]) -> crate::Result<()> {
+pub fn check_expected_panic(
+    outcome: Outcome,
+    report: &Report,
+    must_contain: &[&str],
+) -> crate::Result<()> {
     let Some(msg) = &report.panic else {
-        return Err(format!("panic esperado não ocorreu (resultado do QEMU: {outcome:?})"));
+        return Err(format!(
+            "panic esperado não ocorreu (resultado do QEMU: {outcome:?})"
+        ));
     };
     if outcome != Outcome::Failure {
-        return Err(format!("panic deveria encerrar o QEMU com falha, mas foi {outcome:?}"));
+        return Err(format!(
+            "panic deveria encerrar o QEMU com falha, mas foi {outcome:?}"
+        ));
     }
     for needle in must_contain {
         if !msg.contains(needle) {
@@ -90,20 +109,34 @@ const TIMEOUT: Duration = Duration::from_secs(60);
 /// Boots each self-test kernel variant and checks its serial output.
 pub fn run_all() -> crate::Result<()> {
     run_variant("ktest", check_ktest)?;
-    run_variant("ktest-panic", |o, r| check_expected_panic(o, r, &["ktest-panic deliberado"]))?;
-    run_variant("ktest-fault", |o, r| check_expected_panic(o, r, &["PAGE_FAULT", "cr2=0x7fff00000000"]))?;
+    run_variant("ktest-panic", |o, r| {
+        check_expected_panic(o, r, &["ktest-panic deliberado"])
+    })?;
+    run_variant("ktest-fault", |o, r| {
+        check_expected_panic(o, r, &["PAGE_FAULT", "cr2=0x7fff00000000"])
+    })?;
     println!("ktest: todas as variantes passaram");
     Ok(())
 }
 
-fn run_variant(feature: &str, check: impl Fn(Outcome, &Report) -> crate::Result<()>) -> crate::Result<()> {
+fn run_variant(
+    feature: &str,
+    check: impl Fn(Outcome, &Report) -> crate::Result<()>,
+) -> crate::Result<()> {
     let esp = crate::image::build(&[feature])?;
     let (outcome, serial) = crate::qemu::run_captured(&esp, TIMEOUT)?;
     let report = parse(&serial);
-    check(outcome, &report).map_err(|e| format!("variante {feature}: {e}
+    check(outcome, &report).map_err(|e| {
+        format!(
+            "variante {feature}: {e}
 --- serial ---
-{serial}"))?;
-    println!("ktest: variante {feature} ok ({} teste(s))", report.passed.len());
+{serial}"
+        )
+    })?;
+    println!(
+        "ktest: variante {feature} ok ({} teste(s))",
+        report.passed.len()
+    );
     Ok(())
 }
 
@@ -120,7 +153,10 @@ mod tests {
 ";
         let r = parse(serial);
         assert_eq!(r.passed, vec!["gdt_selectors_loaded".to_string()]);
-        assert_eq!(r.failed, vec![("idt_loaded".to_string(), "base errada".to_string())]);
+        assert_eq!(
+            r.failed,
+            vec![("idt_loaded".to_string(), "base errada".to_string())]
+        );
         assert_eq!(r.done, Some((1, 1)));
         assert_eq!(r.panic, None);
     }
@@ -136,32 +172,59 @@ mod tests {
     #[test]
     fn parse_captures_panic_line() {
         let r = parse("@@TUKOS-PANIC excecao 14 PAGE_FAULT cr2=0x7fff00000000\nr15: 0\n");
-        assert_eq!(r.panic.as_deref(), Some("excecao 14 PAGE_FAULT cr2=0x7fff00000000"));
+        assert_eq!(
+            r.panic.as_deref(),
+            Some("excecao 14 PAGE_FAULT cr2=0x7fff00000000")
+        );
         assert_eq!(r.done, None);
     }
 
     #[test]
     fn check_ktest_accepts_clean_run() {
-        let r = Report { passed: vec!["a".into()], done: Some((1, 0)), ..Default::default() };
+        let r = Report {
+            passed: vec!["a".into()],
+            done: Some((1, 0)),
+            ..Default::default()
+        };
         assert!(check_ktest(Outcome::Success, &r).is_ok());
     }
 
     #[test]
     fn check_ktest_rejects_failures_timeouts_and_missing_done() {
-        let failed = Report { failed: vec![("a".into(), "x".into())], done: Some((0, 1)), ..Default::default() };
+        let failed = Report {
+            failed: vec![("a".into(), "x".into())],
+            done: Some((0, 1)),
+            ..Default::default()
+        };
         assert!(check_ktest(Outcome::Failure, &failed).is_err());
-        let ok_report = Report { passed: vec!["a".into()], done: Some((1, 0)), ..Default::default() };
+        let ok_report = Report {
+            passed: vec!["a".into()],
+            done: Some((1, 0)),
+            ..Default::default()
+        };
         assert!(check_ktest(Outcome::Timeout, &ok_report).is_err());
-        let no_done = Report { passed: vec!["a".into()], ..Default::default() };
+        let no_done = Report {
+            passed: vec!["a".into()],
+            ..Default::default()
+        };
         assert!(check_ktest(Outcome::Success, &no_done).is_err());
-        let empty = Report { done: Some((0, 0)), ..Default::default() };
+        let empty = Report {
+            done: Some((0, 0)),
+            ..Default::default()
+        };
         assert!(check_ktest(Outcome::Success, &empty).is_err());
     }
 
     #[test]
     fn check_expected_panic_requires_failure_and_text() {
-        let r = Report { panic: Some("excecao 14 PAGE_FAULT cr2=0x7fff00000000".into()), ..Default::default() };
-        assert!(check_expected_panic(Outcome::Failure, &r, &["PAGE_FAULT", "cr2=0x7fff00000000"]).is_ok());
+        let r = Report {
+            panic: Some("excecao 14 PAGE_FAULT cr2=0x7fff00000000".into()),
+            ..Default::default()
+        };
+        assert!(
+            check_expected_panic(Outcome::Failure, &r, &["PAGE_FAULT", "cr2=0x7fff00000000"])
+                .is_ok()
+        );
         assert!(check_expected_panic(Outcome::Failure, &r, &["GENERAL_PROTECTION"]).is_err());
         assert!(check_expected_panic(Outcome::Success, &r, &["PAGE_FAULT"]).is_err());
         assert!(check_expected_panic(Outcome::Failure, &Report::default(), &["x"]).is_err());

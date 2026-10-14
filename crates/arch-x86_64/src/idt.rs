@@ -66,7 +66,10 @@ mod hw {
                 let ist = if vector == DOUBLE_FAULT { 1 } else { 0 };
                 (*idt)[vector] = IdtEntry::new(stub, KERNEL_CS, ist, 0);
             }
-            let ptr = DescriptorTablePointer { limit: (256 * 16 - 1) as u16, base: idt as u64 };
+            let ptr = DescriptorTablePointer {
+                limit: (256 * 16 - 1) as u16,
+                base: idt as u64,
+            };
             cpu::lidt(&ptr);
         }
     }

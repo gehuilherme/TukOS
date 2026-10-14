@@ -93,9 +93,20 @@ mod hw {
 
             let [tss_lo, tss_hi] = tss_descriptor(tss as u64, (size_of::<Tss>() - 1) as u32);
             let gdt = &raw mut GDT;
-            gdt.write([0, KERNEL_CODE, KERNEL_DATA, USER_DATA, USER_CODE, tss_lo, tss_hi]);
+            gdt.write([
+                0,
+                KERNEL_CODE,
+                KERNEL_DATA,
+                USER_DATA,
+                USER_CODE,
+                tss_lo,
+                tss_hi,
+            ]);
 
-            let ptr = DescriptorTablePointer { limit: (size_of::<[u64; 7]>() - 1) as u16, base: gdt as u64 };
+            let ptr = DescriptorTablePointer {
+                limit: (size_of::<[u64; 7]>() - 1) as u16,
+                base: gdt as u64,
+            };
             cpu::lgdt(&ptr);
 
             // Far return to reload CS.

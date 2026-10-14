@@ -22,7 +22,11 @@ pub fn build(features: &[&str]) -> crate::Result<PathBuf> {
     let root = workspace_root();
     let kernel = build_kernel(&root, features)?;
     let bootx64 = ensure_limine(&root)?;
-    let variant = if features.is_empty() { "default".to_string() } else { features.join("+") };
+    let variant = if features.is_empty() {
+        "default".to_string()
+    } else {
+        features.join("+")
+    };
     let esp = root.join("target").join(format!("esp-{variant}"));
     assemble_esp(&esp, &kernel, &bootx64)?;
     Ok(esp)
@@ -30,7 +34,13 @@ pub fn build(features: &[&str]) -> crate::Result<PathBuf> {
 
 fn build_kernel(root: &Path, features: &[&str]) -> crate::Result<PathBuf> {
     let mut cmd = Command::new("cargo");
-    cmd.current_dir(root).args(["build", "-p", "tukos-kernel", "--target", "x86_64-unknown-none"]);
+    cmd.current_dir(root).args([
+        "build",
+        "-p",
+        "tukos-kernel",
+        "--target",
+        "x86_64-unknown-none",
+    ]);
     if !features.is_empty() {
         cmd.args(["--features", &features.join(",")]);
     }
@@ -45,11 +55,34 @@ fn ensure_limine(root: &Path) -> crate::Result<PathBuf> {
         return Ok(efi);
     }
     let _ = fs::remove_dir_all(&dir);
-    run(Command::new("git").args(["clone", "--branch", LIMINE_BRANCH, "--single-branch", "--depth", "50", LIMINE_URL]).arg(&dir))?;
-    run(Command::new("git").arg("-C").arg(&dir).args(["checkout", "--quiet", LIMINE_COMMIT])).map_err(|e| {
-        format!("commit {LIMINE_COMMIT} não encontrado em {LIMINE_BRANCH}; atualize LIMINE_COMMIT ({e})")
+    run(Command::new("git")
+        .args([
+            "clone",
+            "--branch",
+            LIMINE_BRANCH,
+            "--single-branch",
+            "--depth",
+            "50",
+            LIMINE_URL,
+        ])
+        .arg(&dir))?;
+    run(Command::new("git")
+        .arg("-C")
+        .arg(&dir)
+        .args(["checkout", "--quiet", LIMINE_COMMIT]))
+    .map_err(|e| {
+        format!(
+            "commit {LIMINE_COMMIT} não encontrado em {LIMINE_BRANCH}; atualize LIMINE_COMMIT ({e})"
+        )
     })?;
-    if efi.is_file() { Ok(efi) } else { Err(format!("{} não existe após o clone do Limine", efi.display())) }
+    if efi.is_file() {
+        Ok(efi)
+    } else {
+        Err(format!(
+            "{} não existe após o clone do Limine",
+            efi.display()
+        ))
+    }
 }
 
 fn assemble_esp(esp: &Path, kernel: &Path, bootx64: &Path) -> crate::Result<()> {

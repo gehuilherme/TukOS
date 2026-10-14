@@ -3,7 +3,10 @@
 type TestFn = fn() -> Result<(), &'static str>;
 
 const TESTS: &[(&str, TestFn)] = &[
-    ("limine_base_revision_supported", limine_base_revision_supported),
+    (
+        "limine_base_revision_supported",
+        limine_base_revision_supported,
+    ),
     ("gdt_selectors_loaded", gdt_selectors_loaded),
     ("tss_loaded", tss_loaded),
     ("idt_loaded", idt_loaded),
@@ -23,7 +26,11 @@ fn gdt_selectors_loaded() -> Result<(), &'static str> {
 }
 
 fn tss_loaded() -> Result<(), &'static str> {
-    if arch_x86_64::cpu::str() == arch_x86_64::gdt::TSS_SEL { Ok(()) } else { Err("TR diferente de TSS_SEL") }
+    if arch_x86_64::cpu::str() == arch_x86_64::gdt::TSS_SEL {
+        Ok(())
+    } else {
+        Err("TR diferente de TSS_SEL")
+    }
 }
 
 fn idt_loaded() -> Result<(), &'static str> {
@@ -43,11 +50,19 @@ fn breakpoint_returns() -> Result<(), &'static str> {
     let before = crate::trap::BREAKPOINTS.load(Ordering::SeqCst);
     arch_x86_64::cpu::int3();
     let after = crate::trap::BREAKPOINTS.load(Ordering::SeqCst);
-    if after == before + 1 { Ok(()) } else { Err("handler de breakpoint nao contou a excecao") }
+    if after == before + 1 {
+        Ok(())
+    } else {
+        Err("handler de breakpoint nao contou a excecao")
+    }
 }
 
 fn limine_base_revision_supported() -> Result<(), &'static str> {
-    if crate::BASE_REVISION.is_supported() { Ok(()) } else { Err("revisao base nao suportada") }
+    if crate::BASE_REVISION.is_supported() {
+        Ok(())
+    } else {
+        Err("revisao base nao suportada")
+    }
 }
 
 pub fn run_all() -> ! {
@@ -65,13 +80,20 @@ pub fn run_all() -> ! {
         }
     }
     kprintln!("@@TUKOS-KTEST-DONE passed={passed} failed={failed}");
-    crate::qemu::exit(if failed == 0 { crate::qemu::ExitCode::Success } else { crate::qemu::ExitCode::Failure })
+    crate::qemu::exit(if failed == 0 {
+        crate::qemu::ExitCode::Success
+    } else {
+        crate::qemu::ExitCode::Failure
+    })
 }
 
 fn fbcon_draws_glyph() -> Result<(), &'static str> {
     let mut guard = crate::fbcon::FBCON.lock();
     let con = guard.as_mut().ok_or("sem framebuffer")?;
-    let (w, h) = (crate::fbcon::FbCon::cell_width(), crate::fbcon::FbCon::cell_height());
+    let (w, h) = (
+        crate::fbcon::FbCon::cell_width(),
+        crate::fbcon::FbCon::cell_height(),
+    );
     let cell_lit = |con: &crate::fbcon::FbCon| (0..h).any(|y| (0..w).any(|x| con.pixel(x, y) != 0));
 
     con.clear();

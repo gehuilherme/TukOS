@@ -15,7 +15,13 @@ fn main() -> ExitCode {
         Some("build") => image::build(&[]).map(|esp| println!("ESP pronta em {}", esp.display())),
         Some("run") => image::build(&[]).and_then(|esp| qemu::run_interactive(&esp)),
         Some("ktest") => ktest::run_all(),
-        Some("test") => util::run(std::process::Command::new("cargo").args(["test", "-p", "xtask", "-p", "arch-x86_64"])),
+        Some("test") => util::run(std::process::Command::new("cargo").args([
+            "test",
+            "-p",
+            "xtask",
+            "-p",
+            "arch-x86_64",
+        ])),
         _ => {
             eprintln!("{USAGE}");
             return ExitCode::from(2);

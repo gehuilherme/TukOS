@@ -35,7 +35,10 @@ unsafe extern "C" fn kmain() -> ! {
     serial::init();
     fbcon::init_from_limine();
     kprintln!("TukOS {} iniciando", env!("CARGO_PKG_VERSION"));
-    assert!(BASE_REVISION.is_supported(), "revisao base do Limine nao suportada");
+    assert!(
+        BASE_REVISION.is_supported(),
+        "revisao base do Limine nao suportada"
+    );
 
     unsafe {
         arch_x86_64::gdt::init();

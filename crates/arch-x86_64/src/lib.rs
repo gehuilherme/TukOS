@@ -2,8 +2,8 @@
 //! hardware access is gated on `target_os = "none"`.
 #![cfg_attr(not(test), no_std)]
 
+pub mod cpu;
 pub mod gdt;
 pub mod idt;
-pub mod trap;
-pub mod cpu;
 pub mod port;
+pub mod trap;
