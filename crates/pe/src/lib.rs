@@ -400,7 +400,9 @@ impl<'a> PeFile<'a> {
     }
 
     /// Iterates the import directory (data directory 1). The whole table is
-    /// validated before the iterator is returned.
+    /// validated before the iterator is returned. Borrow-only and alloc-free
+    /// (`ImportDll::thunks` is an iterator too), so no_std/no-heap consumers
+    /// such as ntdll can use it directly.
     pub fn imports(&self) -> Result<ImportIter<'a>, PeError> {
         let bad = PeError::BadImportTable;
         let (dir_rva, _) = self.data_dir(IMPORT_DIR_INDEX);
@@ -452,7 +454,40 @@ impl<'a> PeFile<'a> {
         self.exports().ok()?.find(|e| e.name == name).map(|e| e.rva)
     }
 
-    /// Iterates the named exports (data directory 0) as `(name, rva)`. The whole
+    /// RVA of the export with biased `ordinal` (`AddressOfFunctions[ordinal - OrdinalBase]`).
+    /// `None` if below `OrdinalBase`, past `NumberOfFunctions`, the slot is empty (0),
+    /// or the table is invalid. Forwarder RVAs are returned as stored. Alloc-free.
+    pub fn export_rva_by_ordinal(&self, ordinal: u16) -> Option<u32> {
+        let (dir_rva, dir_size) = self.data_dir(EXPORT_DIR_INDEX);
+        if dir_rva == 0 || dir_size == 0 {
+            return None;
+        }
+        let t = self.tail_at(dir_rva)?;
+        if t.len() < EXPORT_DIR_SIZE {
+            return None;
+        }
+        let base = rd_u32(t, 16)?;
+        let num_funcs = rd_u32(t, 20)?;
+        let funcs_rva = rd_u32(t, 28)?;
+        let idx = u32::from(ordinal).checked_sub(base)?;
+        if idx >= num_funcs {
+            return None;
+        }
+        let slot = funcs_rva.checked_add(idx.checked_mul(4)?)?;
+        let rva = rd_u32(self.tail_at(slot)?, 0)?;
+        (rva != 0).then_some(rva)
+    }
+
+    /// Resolves an import entry against this file's exports (by name or by ordinal).
+    pub fn resolve_export(&self, entry: &ImportEntry) -> Option<u32> {
+        match entry.kind {
+            ImportKind::Name { name, .. } => self.export_rva_by_name(name),
+            ImportKind::Ordinal(n) => self.export_rva_by_ordinal(n),
+        }
+    }
+
+    /// Iterates the named exports (data directory 0) as `(name, rva)`. Alloc-free,
+    /// usable from no_std consumers. The whole
     /// table is validated before the iterator is returned. Forwarder exports are
     /// not resolved: their `rva` is returned as stored.
     pub fn exports(&self) -> Result<ExportIter<'a>, PeError> {
@@ -844,6 +879,81 @@ mod tests {
         let f = PeFile::parse(&pe).unwrap();
         assert_eq!(f.export_rva_by_name("Bar"), Some(0x1234));
         assert_eq!(f.export_rva_by_name("Nope"), None);
+    }
+
+    /// Like `build_pe_with_exports` but Base=5 and three EAT slots:
+    /// ordinal 5 -> 0x1234 (named "Bar"), ordinal 6 -> empty, ordinal 7 -> 0x1300.
+    fn build_pe_with_ordinal_exports() -> Vec<u8> {
+        let mut blob = export_blob();
+        put(&mut blob, 16, &5u32.to_le_bytes());
+        put(&mut blob, 20, &3u32.to_le_bytes());
+        put(&mut blob, 0x44, &0u32.to_le_bytes());
+        put(&mut blob, 0x48, &0x1300u32.to_le_bytes());
+        let mut pe = build_pe(0x40_0000, 0x1000, &blob, blob.len() as u32, SCN_MEM_READ);
+        set_dir(&mut pe, EXPORT_DIR_INDEX, 0x1000, 0x80);
+        pe
+    }
+
+    #[test]
+    fn export_rva_by_ordinal_resolves_and_bounds() {
+        let pe = build_pe_with_ordinal_exports();
+        let f = PeFile::parse(&pe).unwrap();
+        assert_eq!(f.export_rva_by_ordinal(5), Some(0x1234));
+        assert_eq!(f.export_rva_by_ordinal(7), Some(0x1300));
+        assert_eq!(f.export_rva_by_ordinal(6), None); // empty slot
+        assert_eq!(f.export_rva_by_ordinal(4), None); // below OrdinalBase
+        assert_eq!(f.export_rva_by_ordinal(0), None);
+        assert_eq!(f.export_rva_by_ordinal(8), None); // >= NumberOfFunctions
+        assert_eq!(f.export_rva_by_ordinal(u16::MAX), None);
+    }
+
+    #[test]
+    fn export_rva_by_ordinal_without_export_dir_is_none() {
+        let pe = build_pe(0x40_0000, 0x1000, &[0x90], 1, SCN_MEM_READ);
+        let f = PeFile::parse(&pe).unwrap();
+        assert_eq!(f.export_rva_by_ordinal(1), None);
+    }
+
+    #[test]
+    fn resolve_export_dispatches_name_and_ordinal() {
+        let pe = build_pe_with_ordinal_exports();
+        let f = PeFile::parse(&pe).unwrap();
+        let by_name = ImportEntry {
+            kind: ImportKind::Name {
+                hint: 0,
+                name: "Bar",
+            },
+            iat_rva: 0,
+        };
+        let by_ord = ImportEntry {
+            kind: ImportKind::Ordinal(7),
+            iat_rva: 0,
+        };
+        let missing = ImportEntry {
+            kind: ImportKind::Name {
+                hint: 0,
+                name: "Nope",
+            },
+            iat_rva: 0,
+        };
+        assert_eq!(f.resolve_export(&by_name), Some(0x1234));
+        assert_eq!(f.resolve_export(&by_ord), Some(0x1300));
+        assert_eq!(f.resolve_export(&missing), None);
+    }
+
+    #[test]
+    fn export_rva_by_ordinal_never_panics_on_corruption() {
+        let pe = build_pe_with_ordinal_exports();
+        for pos in RAW_OFF..pe.len() {
+            for val in [0x00u8, 0xFF, 0x80] {
+                let mut m = pe.clone();
+                m[pos] = val;
+                let f = PeFile::parse(&m).unwrap();
+                for o in [0u16, 1, 5, 6, 7, 8, u16::MAX] {
+                    let _ = f.export_rva_by_ordinal(o);
+                }
+            }
+        }
     }
 
     #[test]
