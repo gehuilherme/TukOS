@@ -26,6 +26,13 @@ switch_context:
     pop rbx
     pop rbp
     ret
+
+.global tukos_user_entry
+tukos_user_entry:
+    // Reached via switch_context's `ret` on a user thread's first run. The
+    // iretq frame (RIP,CS,RFLAGS,RSP,SS) sits just above on the kernel stack.
+    swapgs
+    iretq
 "#
 );
 
@@ -34,6 +41,8 @@ unsafe extern "C" {
     /// Saves the current stack pointer into `*save_rsp` and resumes the thread whose
     /// saved stack pointer is `load_rsp`.
     pub fn switch_context(save_rsp: *mut u64, load_rsp: u64);
+    /// First-run target of a user thread: `swapgs; iretq` into Ring 3.
+    pub fn tukos_user_entry();
 }
 
 #[cfg(test)]

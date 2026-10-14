@@ -47,6 +47,7 @@ const TESTS: &[(&str, TestFn)] = &[
         "address_space_drop_frees_user_frames",
         address_space_drop_frees_user_frames,
     ),
+    ("user_process_runs_in_ring3", user_process_runs_in_ring3),
 ];
 
 fn ist_stacks_installed() -> Result<(), &'static str> {
@@ -443,4 +444,19 @@ fn address_space_drop_frees_user_frames() -> Result<(), &'static str> {
         return Err("Drop do AddressSpace nao liberou todos os frames de usuario");
     }
     Ok(())
+}
+
+fn user_process_runs_in_ring3() -> Result<(), &'static str> {
+    use core::sync::atomic::Ordering;
+    crate::syscall::LAST_MARK.store(0, Ordering::SeqCst);
+    // Payload: SYS_WRITE_MARK(0xBEEF) in a loop.
+    crate::process::spawn_demo_user();
+    // The boot thread yields; the user process must run in Ring 3 and reach the kernel.
+    for _ in 0..2000 {
+        if crate::syscall::LAST_MARK.load(Ordering::SeqCst) == 0xBEEF {
+            return Ok(());
+        }
+        crate::sched::yield_now();
+    }
+    Err("o processo de usuario nao executou em Ring 3")
 }

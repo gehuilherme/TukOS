@@ -18,6 +18,10 @@ struct Thread {
     entry: Option<fn()>,
     // Keeps the stack allocation alive; None for the boot thread.
     _stack: Option<Box<[u8]>>,
+    /// Physical root of the thread's address space; 0 = kernel space.
+    cr3: u64,
+    /// Top of the kernel stack used for Ring 3 -> 0 transitions; 0 = leave rsp0 alone.
+    kstack_top: u64,
 }
 
 struct Scheduler {
@@ -32,6 +36,8 @@ pub fn init() {
         rsp: 0,
         entry: None,
         _stack: None,
+        cr3: 0,
+        kstack_top: 0,
     };
     let mut threads = Vec::with_capacity(MAX_THREADS);
     threads.push(boot);
@@ -82,6 +88,49 @@ pub fn spawn(entry: fn()) -> usize {
         rsp,
         entry: Some(entry),
         _stack: Some(stack),
+        cr3: 0,
+        kstack_top: 0,
+    });
+    s.threads.len() - 1
+}
+
+/// Spawns a thread whose first run drops to Ring 3 at `entry` with stack
+/// `user_stack_top`, in the address space rooted at `space_root`.
+pub fn spawn_user(
+    space_root: u64,
+    entry: u64,
+    user_stack_top: u64,
+    mut kstack: Box<[u8]>,
+) -> usize {
+    let top = (kstack.as_mut_ptr() as u64 + kstack.len() as u64) & !0xF;
+    // Low -> high: 6 callee-saved zeros, tukos_user_entry, then the iretq frame
+    // (rip, cs, rflags, rsp, ss).
+    let rsp = top - 12 * 8;
+    unsafe {
+        let p = rsp as *mut u64;
+        for i in 0..6 {
+            p.add(i).write(0);
+        }
+        p.add(6)
+            .write(arch_x86_64::context::tukos_user_entry as *const () as usize as u64);
+        p.add(7).write(entry);
+        p.add(8).write(arch_x86_64::gdt::USER_CS as u64);
+        p.add(9).write(0x202);
+        p.add(10).write(user_stack_top);
+        p.add(11).write(arch_x86_64::gdt::USER_DS as u64);
+    }
+    let mut guard = SCHED.lock();
+    let s = guard.as_mut().expect("scheduler nao iniciado");
+    assert!(
+        s.threads.len() < MAX_THREADS,
+        "sched: limite de {MAX_THREADS} threads atingido"
+    );
+    s.threads.push(Thread {
+        rsp,
+        entry: None,
+        _stack: Some(kstack),
+        cr3: space_root,
+        kstack_top: top,
     });
     s.threads.len() - 1
 }
@@ -89,7 +138,7 @@ pub fn spawn(entry: fn()) -> usize {
 /// Switches to the next thread. The scheduler guard is dropped before the
 /// switch so the resumed thread can take the lock; interrupts must be disabled.
 fn switch_to_next() {
-    let (save, load) = {
+    let (save, load, target_cr3, target_kstack_top) = {
         let mut guard = SCHED.lock();
         let Some(s) = guard.as_mut() else { return };
         if s.threads.len() < 2 {
@@ -100,8 +149,20 @@ fn switch_to_next() {
         s.current = to;
         let save = &mut s.threads[from].rsp as *mut u64;
         let load = s.threads[to].rsp;
-        (save, load)
+        (save, load, s.threads[to].cr3, s.threads[to].kstack_top)
     };
+    unsafe {
+        if target_kstack_top != 0 {
+            arch_x86_64::gdt::set_rsp0(target_kstack_top);
+            // SYSCALL entry must also run on this thread's own kernel stack,
+            // never on the stack of whichever thread last entered Ring 3.
+            arch_x86_64::percpu::set_kernel_rsp(target_kstack_top);
+        }
+        let cur = crate::arch_cr3_base();
+        if target_cr3 != 0 && target_cr3 != cur {
+            arch_x86_64::cpu::write_cr3(target_cr3);
+        }
+    }
     unsafe { arch_x86_64::context::switch_context(save, load) };
 }
 

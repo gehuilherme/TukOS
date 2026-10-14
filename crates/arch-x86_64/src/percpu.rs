@@ -49,13 +49,29 @@ mod hw {
         }
     }
 
+    /// Sets the kernel stack top used by the SYSCALL entry stub (via GS).
+    ///
+    /// # Safety
+    /// Must run in Ring 0 with the kernel GS base active (not between swapgs
+    /// pairs) and with interrupts disabled.
+    pub unsafe fn set_kernel_rsp(top: u64) {
+        unsafe {
+            core::arch::asm!(
+                "mov gs:[{off}], {top}",
+                off = const super::OFF_KERNEL_RSP,
+                top = in(reg) top,
+                options(nostack, preserves_flags)
+            );
+        }
+    }
+
     pub fn gs_base() -> u64 {
         unsafe { read_msr(IA32_GS_BASE) }
     }
 }
 
 #[cfg(target_os = "none")]
-pub use hw::{gs_base, install};
+pub use hw::{gs_base, install, set_kernel_rsp};
 
 #[cfg(test)]
 mod tests {
