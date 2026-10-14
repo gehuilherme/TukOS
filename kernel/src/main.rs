@@ -15,6 +15,7 @@ mod qemu;
 mod sched;
 mod serial;
 mod syscall;
+mod teb;
 mod trap;
 mod user_demo;
 

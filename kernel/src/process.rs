@@ -141,7 +141,19 @@ fn spawn_payload(bytes: &[u8]) -> usize {
     }
 
     let kstack = alloc::vec![0u8; KSTACK_SIZE].into_boxed_slice();
-    crate::sched::spawn_user(space, USER_CODE_VA, USER_STACK_TOP, kstack)
+    // TEB/PEB pages sit above the stack page, one guard page apart.
+    let teb_va = USER_STACK_VA + 2 * 4096;
+    let peb_va = USER_STACK_VA + 3 * 4096;
+    crate::teb::setup(
+        &space,
+        teb_va,
+        peb_va,
+        USER_CODE_VA,
+        USER_STACK_TOP,
+        USER_STACK_VA,
+    )
+    .expect("teb setup");
+    crate::sched::spawn_user(space, USER_CODE_VA, USER_STACK_TOP, kstack, teb_va)
 }
 
 // ---------------------------------------------------------------------------
@@ -278,9 +290,38 @@ pub fn spawn_test_pe() -> usize {
     spawn_pe(&build_test_pe(), 0x40_0000)
 }
 
+/// Machine code of the TEB probe: reads gs:[0x30] (NtTib.Self), reports it via
+/// SYS_WRITE_MARK, then exits.
+const TEB_PROBE_TEXT: [u8; 39] = [
+    0x65, 0x48, 0x8B, 0x04, 0x25, 0x30, 0x00, 0x00, 0x00, // mov rax, gs:[0x30]
+    0x48, 0x89, 0xC7, // mov rdi, rax
+    0x48, 0xC7, 0xC0, 0x01, 0x00, 0x00, 0x00, // mov rax, 1 (SYS_WRITE_MARK)
+    0x0F, 0x05, // syscall
+    0x48, 0xC7, 0xC0, 0x00, 0x00, 0x00, 0x00, // mov rax, 0 (SYS_EXIT)
+    0x48, 0xC7, 0xC7, 0x00, 0x00, 0x00, 0x00, // mov rdi, 0
+    0x0F, 0x05, // syscall
+    0x0F, 0x0B, // ud2
+];
+
+/// Starts a PE whose code reports its own TEB address; returns that TEB VA.
+pub fn spawn_teb_probe_pe() -> u64 {
+    let pe = build_pe(
+        0x1000,
+        &TEB_PROBE_TEXT,
+        TEB_PROBE_TEXT.len() as u32,
+        SCN_CODE_EXEC_READ,
+    );
+    spawn_pe_inner(&pe, PE_IMAGE_BASE).1
+}
+
 /// Loads `image` at `load_base` into a fresh user space, maps a user stack and
 /// schedules a user thread at the entry point.
 pub fn spawn_pe(image: &[u8], load_base: u64) -> usize {
+    spawn_pe_inner(image, load_base).0
+}
+
+/// Returns (thread id, TEB VA).
+fn spawn_pe_inner(image: &[u8], load_base: u64) -> (usize, u64) {
     let space = AddressSpace::new_user();
     let entry = crate::loader::load_pe(&space, image, load_base).expect("load_pe");
     // Stack goes one guard page above the image so it can never collide with it.
@@ -297,6 +338,12 @@ pub fn spawn_pe(image: &[u8], load_base: u64) -> usize {
             )
             .expect("map pilha");
     }
+    // TEB/PEB pages sit above the stack page, one guard page apart.
+    let teb_va = stack_va + 2 * 4096;
+    let peb_va = stack_va + 3 * 4096;
+    crate::teb::setup(&space, teb_va, peb_va, load_base, stack_va + 4096, stack_va)
+        .expect("teb setup");
     let kstack = alloc::vec![0u8; KSTACK_SIZE].into_boxed_slice();
-    crate::sched::spawn_user(space, entry, stack_va + 4096, kstack)
+    let id = crate::sched::spawn_user(space, entry, stack_va + 4096, kstack, teb_va);
+    (id, teb_va)
 }

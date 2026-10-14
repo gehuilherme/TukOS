@@ -68,10 +68,17 @@ mod hw {
     pub fn gs_base() -> u64 {
         unsafe { read_msr(IA32_GS_BASE) }
     }
+
+    /// # Safety
+    /// Sets the GS base that `swapgs` installs on the next Ring 3 entry (the user
+    /// TEB). Call on the boot CPU before entering a user thread.
+    pub unsafe fn set_user_gs_base(teb_va: u64) {
+        unsafe { write_msr(IA32_KERNEL_GS_BASE, teb_va) };
+    }
 }
 
 #[cfg(target_os = "none")]
-pub use hw::{gs_base, install, set_kernel_rsp};
+pub use hw::{gs_base, install, set_kernel_rsp, set_user_gs_base};
 
 #[cfg(test)]
 mod tests {

@@ -33,6 +33,8 @@ struct Thread {
     state: ThreadState,
     /// Owned address space of a user thread; None for kernel threads.
     space: Option<AddressSpace>,
+    /// User VA of the thread's TEB (reached via GS in Ring 3); 0 = none.
+    teb_va: u64,
 }
 
 struct Scheduler {
@@ -57,6 +59,7 @@ pub fn init() {
         kstack_top: 0,
         state: ThreadState::Ready,
         space: None,
+        teb_va: 0,
     };
     let mut threads = Vec::with_capacity(MAX_THREADS);
     threads.push(boot);
@@ -112,6 +115,7 @@ pub fn spawn(entry: fn()) -> usize {
         kstack_top: 0,
         state: ThreadState::Ready,
         space: None,
+        teb_va: 0,
     });
     s.threads.len() - 1
 }
@@ -123,6 +127,7 @@ pub fn spawn_user(
     entry: u64,
     user_stack_top: u64,
     mut kstack: Box<[u8]>,
+    teb_va: u64,
 ) -> usize {
     let space_root = space.root();
     let top = (kstack.as_mut_ptr() as u64 + kstack.len() as u64) & !0xF;
@@ -156,6 +161,7 @@ pub fn spawn_user(
         kstack_top: top,
         state: ThreadState::Ready,
         space: Some(space),
+        teb_va,
     });
     s.threads.len() - 1
 }
@@ -163,7 +169,7 @@ pub fn spawn_user(
 /// Switches to the next thread. The scheduler guard is dropped before the
 /// switch so the resumed thread can take the lock; interrupts must be disabled.
 fn switch_to_next() {
-    let (save, load, target_cr3, target_kstack_top) = {
+    let (save, load, target_cr3, target_kstack_top, target_teb_va) = {
         let mut guard = SCHED.lock();
         let Some(s) = guard.as_mut() else { return };
         if s.threads.len() < 2 {
@@ -181,7 +187,13 @@ fn switch_to_next() {
         s.current = to;
         let save = &mut s.threads[from].rsp as *mut u64;
         let load = s.threads[to].rsp;
-        (save, load, s.threads[to].cr3, s.threads[to].kstack_top)
+        (
+            save,
+            load,
+            s.threads[to].cr3,
+            s.threads[to].kstack_top,
+            s.threads[to].teb_va,
+        )
     };
     unsafe {
         if target_kstack_top != 0 {
@@ -189,6 +201,10 @@ fn switch_to_next() {
             // SYSCALL entry must also run on this thread's own kernel stack,
             // never on the stack of whichever thread last entered Ring 3.
             arch_x86_64::percpu::set_kernel_rsp(target_kstack_top);
+        }
+        // The user GS base (what swapgs installs on Ring 3 entry) is the TEB.
+        if target_teb_va != 0 {
+            arch_x86_64::percpu::set_user_gs_base(target_teb_va);
         }
         // Kernel threads (cr3 == 0) explicitly load the kernel PML4, so the CPU
         // never keeps translating through a user space that may be reaped next.

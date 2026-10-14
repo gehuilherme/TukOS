@@ -62,7 +62,28 @@ const TESTS: &[(&str, TestFn)] = &[
     ("two_user_processes_preempt", two_user_processes_preempt),
     ("reloc_dir64_crosses_page", reloc_dir64_crosses_page),
     ("stack_placed_above_image", stack_placed_above_image),
+    ("user_reads_own_teb", user_reads_own_teb),
 ];
+
+fn user_reads_own_teb() -> Result<(), &'static str> {
+    use core::sync::atomic::Ordering;
+    // The test PE reads gs:[0x30] (NtTib.Self) and passes it to SYS_WRITE_MARK;
+    // the kernel records it. It must equal the thread's TEB VA.
+    crate::syscall::LAST_MARK.store(0, Ordering::SeqCst);
+    let teb_va = crate::process::spawn_teb_probe_pe();
+    for _ in 0..8000 {
+        crate::sched::yield_now();
+        let m = crate::syscall::LAST_MARK.load(Ordering::SeqCst);
+        if m != 0 {
+            return if m == teb_va {
+                Ok(())
+            } else {
+                Err("gs:[0x30] (TEB Self) != TEB VA da thread")
+            };
+        }
+    }
+    Err("probe de TEB nao executou")
+}
 
 fn ist_stacks_installed() -> Result<(), &'static str> {
     use arch_x86_64::{gdt, idt};
