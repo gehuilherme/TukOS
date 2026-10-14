@@ -1,9 +1,15 @@
 [workspace]
 resolver = "3"
-members = ["xtask", "crates/arch-x86_64", "crates/mm", "crates/pe", "kernel"]
+members = ["xtask", "crates/arch-x86_64", "crates/mm", "crates/pe", "crates/ntdll", "kernel"]
 default-members = ["xtask", "crates/arch-x86_64", "crates/mm", "crates/pe"]
 
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
+
+[profile.release]
+panic = "abort"
+
+[profile.dev]
+panic = "abort"

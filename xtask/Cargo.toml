@@ -8,3 +8,6 @@ publish = false
 [dependencies]
 fatfs = "0.3"
 gpt = "4"
+
+[dev-dependencies]
+pe = { path = "../crates/pe" }
