@@ -72,7 +72,9 @@ static CPU: Cpu = Cpu;
 
 impl<T> IrqMutex<T> {
     pub const fn new(value: T) -> Self {
-        Self { inner: Mutex::new(value) }
+        Self {
+            inner: Mutex::new(value),
+        }
     }
 
     pub fn lock(&self) -> IrqMutexGuard<'_, T> {
@@ -86,14 +88,25 @@ impl<T> IrqMutex<T> {
     pub fn lock_with<'a, S: IfState>(&'a self, state: &'a S) -> IrqMutexGuard<'a, T, S> {
         let restore = state.get();
         state.set(false);
-        IrqMutexGuard { guard: Some(self.inner.lock()), restore, state }
+        IrqMutexGuard {
+            guard: Some(self.inner.lock()),
+            restore,
+            state,
+        }
     }
 
-    pub fn try_lock_with<'a, S: IfState>(&'a self, state: &'a S) -> Option<IrqMutexGuard<'a, T, S>> {
+    pub fn try_lock_with<'a, S: IfState>(
+        &'a self,
+        state: &'a S,
+    ) -> Option<IrqMutexGuard<'a, T, S>> {
         let restore = state.get();
         state.set(false);
         match self.inner.try_lock() {
-            Some(guard) => Some(IrqMutexGuard { guard: Some(guard), restore, state }),
+            Some(guard) => Some(IrqMutexGuard {
+                guard: Some(guard),
+                restore,
+                state,
+            }),
             None => {
                 state.set(restore);
                 None
@@ -173,7 +186,10 @@ mod tests {
         let gb = b.lock_with(&state);
         assert!(!state.get());
         drop(gb);
-        assert!(!state.get(), "inner unlock must not re-enable while outer is held");
+        assert!(
+            !state.get(),
+            "inner unlock must not re-enable while outer is held"
+        );
         drop(ga);
         assert!(state.get());
     }

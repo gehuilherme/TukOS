@@ -1,8 +1,8 @@
 //! Text console drawn on the Limine framebuffer (32 bpp only).
 
+use arch_x86_64::interrupts::IrqMutex;
 use core::fmt;
 use noto_sans_mono_bitmap::{FontWeight, RasterHeight, get_raster, get_raster_width};
-use arch_x86_64::interrupts::IrqMutex;
 
 const WEIGHT: FontWeight = FontWeight::Regular;
 const HEIGHT: RasterHeight = RasterHeight::Size16;

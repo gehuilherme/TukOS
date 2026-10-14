@@ -1,8 +1,8 @@
 //! 16550 UART on COM1, used for diagnostics and the test protocol.
 
+use arch_x86_64::interrupts::IrqMutex;
 use arch_x86_64::port::{inb, outb};
 use core::fmt;
-use arch_x86_64::interrupts::IrqMutex;
 
 const COM1: u16 = 0x3F8;
 

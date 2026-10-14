@@ -2,9 +2,9 @@
 //! The bitmap itself is carved out of the largest usable region and addressed
 //! through the HHDM, so no chicken-and-egg allocation is needed.
 
+use arch_x86_64::interrupts::IrqMutex;
 use limine::memory_map::{Entry, EntryType};
 use mm::frame::{BitmapAllocator, bitmap_words_for, total_frames_for};
-use arch_x86_64::interrupts::IrqMutex;
 
 pub use mm::frame::FRAME_SIZE;
 

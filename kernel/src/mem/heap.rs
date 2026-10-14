@@ -1,10 +1,10 @@
 //! Kernel heap: a fixed virtual window backed by freshly allocated frames, with a
 //! `FreeListHeap` behind a spinlock installed as the global allocator.
 
+use arch_x86_64::interrupts::IrqMutex;
 use core::alloc::{GlobalAlloc, Layout};
 use mm::heap::FreeListHeap;
 use mm::paging::PageFlags;
-use arch_x86_64::interrupts::IrqMutex;
 
 /// Heap virtual window: 2 MiB starting here (above the kernel image, below the
 /// HHDM). 512 pages.
