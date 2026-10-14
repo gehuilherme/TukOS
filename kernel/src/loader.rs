@@ -16,11 +16,47 @@ pub enum LoadError {
 
 const PAGE: u64 = 4096;
 
+/// Read-modify-writes a little-endian u64 at user VA `va` in `space`, translating
+/// each byte's page separately so it is safe across a page boundary. Returns
+/// false if any byte is unmapped.
+fn rmw_u64(space: &AddressSpace, va: u64, f: impl FnOnce(u64) -> u64) -> bool {
+    let mut bytes = [0u8; 8];
+    for i in 0..8u64 {
+        let a = va + i;
+        let Some(phys) = space.translate(a & !(PAGE - 1)) else {
+            return false;
+        };
+        let p = (phys_to_virt(phys) + (a & (PAGE - 1))) as *const u8;
+        bytes[i as usize] = unsafe { core::ptr::read_volatile(p) };
+    }
+    let v = f(u64::from_le_bytes(bytes)).to_le_bytes();
+    for i in 0..8u64 {
+        let a = va + i;
+        let Some(phys) = space.translate(a & !(PAGE - 1)) else {
+            return false;
+        };
+        let p = (phys_to_virt(phys) + (a & (PAGE - 1))) as *mut u8;
+        unsafe { core::ptr::write_volatile(p, v[i as usize]) };
+    }
+    true
+}
+
+/// First page-aligned address above the image when loaded at `load_base`.
+pub fn image_top(image: &[u8], load_base: u64) -> Result<u64, LoadError> {
+    let pe = PeFile::parse(image).map_err(LoadError::Parse)?;
+    let mut end = 0u64;
+    for sec in pe.sections() {
+        let sec_end = sec.rva as u64 + sec.virtual_size as u64;
+        if sec_end > end {
+            end = sec_end;
+        }
+    }
+    Ok(load_base + ((end + PAGE - 1) & !(PAGE - 1)))
+}
+
 /// Maps every section of `image` into `space` at `load_base + rva`, zero-filling
 /// the slack beyond raw data, applies DIR64 base relocations for the delta, and
 /// returns the entry point virtual address.
-///
-/// Limitation: a DIR64 relocation that crosses a page boundary is not handled.
 pub fn load_pe(space: &AddressSpace, image: &[u8], load_base: u64) -> Result<u64, LoadError> {
     let pe = PeFile::parse(image).map_err(LoadError::Parse)?;
     let delta = load_base.wrapping_sub(pe.image_base());
@@ -64,12 +100,8 @@ pub fn load_pe(space: &AddressSpace, image: &[u8], load_base: u64) -> Result<u64
             match r.kind {
                 REL_BASED_ABSOLUTE => {}
                 REL_BASED_DIR64 => {
-                    let va = load_base + r.rva as u64;
-                    let phys = space.translate(va & !(PAGE - 1)).ok_or(LoadError::Map)?;
-                    let p = (phys_to_virt(phys) + (va & (PAGE - 1))) as *mut u64;
-                    unsafe {
-                        let v = core::ptr::read_unaligned(p);
-                        core::ptr::write_unaligned(p, v.wrapping_add(delta));
+                    if !rmw_u64(space, load_base + r.rva as u64, |v| v.wrapping_add(delta)) {
+                        return Err(LoadError::Map);
                     }
                 }
                 _ => return Err(LoadError::UnsupportedReloc),

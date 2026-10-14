@@ -60,6 +60,8 @@ const TESTS: &[(&str, TestFn)] = &[
     ("pe_loads_runs_and_exits", pe_loads_runs_and_exits),
     ("load_zero_fills_bss", load_zero_fills_bss),
     ("two_user_processes_preempt", two_user_processes_preempt),
+    ("reloc_dir64_crosses_page", reloc_dir64_crosses_page),
+    ("stack_placed_above_image", stack_placed_above_image),
 ];
 
 fn ist_stacks_installed() -> Result<(), &'static str> {
@@ -572,6 +574,47 @@ fn higher_half_pml4_fully_reserved() -> Result<(), &'static str> {
         if !entry_present(e) {
             return Err("entrada PML4 da metade alta nao reservada");
         }
+    }
+    Ok(())
+}
+
+fn reloc_dir64_crosses_page() -> Result<(), &'static str> {
+    use crate::mem::space::AddressSpace;
+    // PE with a DIR64 relocation whose 8-byte target straddles a page boundary
+    // (target RVA 0x1FFC), loaded at a base != image_base so delta != 0.
+    let image = crate::process::build_reloc_cross_page_pe();
+    let space = AddressSpace::new_user();
+    let load_base = 0x80_0000u64;
+    crate::loader::load_pe(&space, &image, load_base).map_err(|_| "load falhou")?;
+    let lo_phys = space
+        .translate(load_base + 0x1000)
+        .ok_or("pagina 1 nao mapeada")?;
+    let hi_phys = space
+        .translate(load_base + 0x2000)
+        .ok_or("pagina 2 nao mapeada")?;
+    let lo = crate::mem::frames::phys_to_virt(lo_phys) as *const u8;
+    let hi = crate::mem::frames::phys_to_virt(hi_phys) as *const u8;
+    let mut bytes = [0u8; 8];
+    unsafe {
+        core::ptr::copy_nonoverlapping(lo.add(0xFFC), bytes.as_mut_ptr(), 4);
+        core::ptr::copy_nonoverlapping(hi, bytes.as_mut_ptr().add(4), 4);
+    }
+    let got = u64::from_le_bytes(bytes);
+    let expected = crate::process::RELOC_FIXTURE_ORIGINAL
+        .wrapping_add(load_base.wrapping_sub(crate::process::RELOC_FIXTURE_IMAGE_BASE));
+    if got != expected {
+        return Err("relocacao entre paginas incorreta");
+    }
+    Ok(())
+}
+
+fn stack_placed_above_image() -> Result<(), &'static str> {
+    // image_top of the standard test PE must be above its last section end.
+    let image = crate::process::test_pe_bytes();
+    let base = 0x40_0000u64;
+    let top = crate::loader::image_top(image, base).map_err(|_| "image_top falhou")?;
+    if top <= base + 0x1000 {
+        return Err("image_top nao ficou acima da imagem");
     }
     Ok(())
 }

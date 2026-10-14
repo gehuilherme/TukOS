@@ -208,6 +208,71 @@ pub fn build_bss_test_pe() -> alloc::vec::Vec<u8> {
     build_pe(0x1000, &[0xAA], 0x20, SCN_DATA_RW)
 }
 
+pub const RELOC_FIXTURE_IMAGE_BASE: u64 = 0x40_0000;
+pub const RELOC_FIXTURE_ORIGINAL: u64 = 0x1122_3344_5566_7788;
+
+/// A PE with a 2-page data section at RVA 0x1000 holding a u64 at RVA 0x1FFC
+/// (straddling pages 0x1000/0x2000) and a .reloc section at RVA 0x3000 with one
+/// DIR64 entry for that u64.
+pub fn build_reloc_cross_page_pe() -> alloc::vec::Vec<u8> {
+    const OPT_SIZE: usize = 112 + 16 * 8;
+    const DATA_RAW: usize = 0x2000;
+    const RELOC_RAW_OFF: usize = PE_RAW_OFF + DATA_RAW;
+    let mut v = alloc::vec![0u8; RELOC_RAW_OFF + 0x0A];
+    put(&mut v, 0, &0x5A4Du16.to_le_bytes());
+    put(&mut v, 0x3C, &0x40u32.to_le_bytes());
+    put(&mut v, 0x40, &0x0000_4550u32.to_le_bytes());
+    let coff = 0x44;
+    put(&mut v, coff, &0x8664u16.to_le_bytes());
+    put(&mut v, coff + 2, &2u16.to_le_bytes()); // 2 sections
+    put(&mut v, coff + 16, &(OPT_SIZE as u16).to_le_bytes());
+    let opt = coff + 20;
+    put(&mut v, opt, &0x20Bu16.to_le_bytes());
+    put(&mut v, opt + 16, &0x1000u32.to_le_bytes());
+    put(&mut v, opt + 24, &RELOC_FIXTURE_IMAGE_BASE.to_le_bytes());
+    put(&mut v, opt + 56, &0x4000u32.to_le_bytes()); // SizeOfImage
+    put(&mut v, opt + 108, &16u32.to_le_bytes());
+    // Data directory 5 (base relocation): RVA 0x3000, size 0x0A.
+    put(&mut v, opt + 112 + 5 * 8, &0x3000u32.to_le_bytes());
+    put(&mut v, opt + 112 + 5 * 8 + 4, &0x0Au32.to_le_bytes());
+    let s = opt + OPT_SIZE;
+    // .data: RVA 0x1000, 0x2000 bytes.
+    put(&mut v, s, b".data   ");
+    put(&mut v, s + 8, &(DATA_RAW as u32).to_le_bytes());
+    put(&mut v, s + 12, &0x1000u32.to_le_bytes());
+    put(&mut v, s + 16, &(DATA_RAW as u32).to_le_bytes());
+    put(&mut v, s + 20, &(PE_RAW_OFF as u32).to_le_bytes());
+    put(&mut v, s + 36, &SCN_DATA_RW.to_le_bytes());
+    // .reloc: RVA 0x3000, 0x0A bytes.
+    let s2 = s + 40;
+    put(&mut v, s2, b".reloc  ");
+    put(&mut v, s2 + 8, &0x0Au32.to_le_bytes());
+    put(&mut v, s2 + 12, &0x3000u32.to_le_bytes());
+    put(&mut v, s2 + 16, &0x0Au32.to_le_bytes());
+    put(&mut v, s2 + 20, &(RELOC_RAW_OFF as u32).to_le_bytes());
+    put(&mut v, s2 + 36, &0x4200_0040u32.to_le_bytes()); // INIT_DATA|DISCARDABLE|READ
+    // The u64 at RVA 0x1FFC -> file offset PE_RAW_OFF + 0xFFC.
+    put(
+        &mut v,
+        PE_RAW_OFF + 0xFFC,
+        &RELOC_FIXTURE_ORIGINAL.to_le_bytes(),
+    );
+    // Base relocation block: PageRVA 0x1000, BlockSize 0x0A, one DIR64 @ 0xFFC.
+    put(&mut v, RELOC_RAW_OFF, &0x1000u32.to_le_bytes());
+    put(&mut v, RELOC_RAW_OFF + 4, &0x0Au32.to_le_bytes());
+    put(
+        &mut v,
+        RELOC_RAW_OFF + 8,
+        &((10u16 << 12) | 0xFFC).to_le_bytes(),
+    );
+    v
+}
+
+/// The embedded test PE bytes (built once per call and leaked; test use only).
+pub fn test_pe_bytes() -> &'static [u8] {
+    build_test_pe().leak()
+}
+
 /// Loads and starts the embedded test PE at its preferred base.
 pub fn spawn_test_pe() -> usize {
     spawn_pe(&build_test_pe(), 0x40_0000)
@@ -218,11 +283,13 @@ pub fn spawn_test_pe() -> usize {
 pub fn spawn_pe(image: &[u8], load_base: u64) -> usize {
     let space = AddressSpace::new_user();
     let entry = crate::loader::load_pe(&space, image, load_base).expect("load_pe");
+    // Stack goes one guard page above the image so it can never collide with it.
+    let stack_va = crate::loader::image_top(image, load_base).expect("image_top") + 4096;
     let stack_phys = crate::mem::frames::alloc_frame().expect("sem frame p/ pilha");
     unsafe {
         space
             .map(
-                USER_STACK_VA,
+                stack_va,
                 stack_phys,
                 PageFlags::USER
                     .union(PageFlags::WRITABLE)
@@ -231,5 +298,5 @@ pub fn spawn_pe(image: &[u8], load_base: u64) -> usize {
             .expect("map pilha");
     }
     let kstack = alloc::vec![0u8; KSTACK_SIZE].into_boxed_slice();
-    crate::sched::spawn_user(space, entry, USER_STACK_TOP, kstack)
+    crate::sched::spawn_user(space, entry, stack_va + 4096, kstack)
 }
