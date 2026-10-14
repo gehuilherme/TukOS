@@ -113,7 +113,7 @@ const TESTS: &[(&str, TestFn)] = &[
     ("ntdll_embedded_parses", ntdll_embedded_parses),
     ("kernel32_embedded_parses", kernel32_embedded_parses),
     ("kernel32_exports_crt_surface", kernel32_exports_crt_surface),
-    ("crt_hello_resolves_imports", crt_hello_resolves_imports),
+    ("crt_hello_runs", crt_hello_runs),
     ("two_modules_no_overlap", two_modules_no_overlap),
     (
         "import_resolve_rejects_bad_iat_slot",
@@ -302,15 +302,17 @@ fn kernel32_exports_crt_surface() -> Result<(), &'static str> {
 /// A real `/MT` MSVC `hello.exe` (target/conformance/crt/hello.exe; empty if not built).
 static CRT_HELLO_EXE: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/crt_hello.exe"));
 
-/// Boots the real CRT hello through the multi-module loader. Plan 13 Task 2: every
-/// import must resolve (no loader death: UNRESOLVED/NO_DEP/BAD_PE/BAD_IAT...), i.e.
-/// the exe gets into CRT startup. What happens after (stdio) is Task 3.
-fn crt_hello_resolves_imports() -> Result<(), &'static str> {
+/// Boots the real `/MT` CRT hello through the multi-module loader (exe+kernel32+ntdll) and
+/// checks the whole run: raw stdout "Hello, TukOS!\r\n" (15 bytes: CRT text mode turns
+/// `\n` into `\r\n`; the conformance harness normalises to 14), exit 0, frames reaped.
+fn crt_hello_runs() -> Result<(), &'static str> {
     use core::sync::atomic::Ordering;
     if !have_both_dlls() || CRT_HELLO_EXE.is_empty() {
         return Ok(()); // dlls/hello.exe not embedded on this host: skip.
     }
     crate::syscall::LAST_TERMINATE_STATUS.store(u64::MAX, Ordering::SeqCst);
+    crate::syscall::LAST_WRITE_LEN.store(0, Ordering::SeqCst);
+    let before = crate::mem::frames::free_frame_count();
     crate::process::spawn_exe_image_with_k32(CRT_HELLO_EXE.to_vec());
     for _ in 0..40000 {
         crate::sched::yield_now();
@@ -321,12 +323,21 @@ fn crt_hello_resolves_imports() -> Result<(), &'static str> {
                 crate::kprintln!("loader status {:#x}", st);
                 return Err("crt hello: o loader morreu (import nao resolvido?)");
             }
-            crate::kprintln!("crt hello terminou com status {:#x}", st);
-            return Ok(());
+            if st != 0 {
+                crate::kprintln!("crt hello terminou com status {:#x}", st);
+                return Err("crt hello: exit code != 0");
+            }
+            if crate::syscall::LAST_WRITE_LEN.load(Ordering::SeqCst) != 15
+                || !crate::syscall::last_write_is(b"Hello, TukOS!\r\n")
+            {
+                return Err("crt hello: stdout diferente de Hello, TukOS!");
+            }
+            if crate::mem::frames::free_frame_count() == before {
+                return Ok(());
+            }
         }
     }
-    // Still running (no loader death within the budget) = past import binding.
-    Ok(())
+    Err("crt hello nao terminou/recolheu os frames")
 }
 
 const EXE_BASE: u64 = 0x40_0000;

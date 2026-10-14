@@ -2,13 +2,24 @@
 //! user-mode loader path and lets its output reach the serial between markers.
 
 /// The conformance program built by `cargo xtask conformance` (empty if absent).
-#[cfg(not(any(feature = "conformance32", feature = "conformance_heap")))]
+#[cfg(not(any(
+    feature = "conformance32",
+    feature = "conformance_heap",
+    feature = "conformance_crt"
+)))]
 static CONFORMANCE_EXE: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/conformance.exe"));
 /// With `conformance32` the program is hello32.exe (imports kernel32), run as exe+kernel32+ntdll.
-#[cfg(all(feature = "conformance32", not(feature = "conformance_heap")))]
+#[cfg(all(
+    feature = "conformance32",
+    not(feature = "conformance_heap"),
+    not(feature = "conformance_crt")
+))]
 static CONFORMANCE_EXE: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/conformance32.exe"));
+/// With `conformance_crt` the program is the real `/MT` CRT hello.exe (exe+kernel32+ntdll).
+#[cfg(feature = "conformance_crt")]
+static CONFORMANCE_EXE: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/crt_hello.exe"));
 /// With `conformance_heap` the program is heap.exe (HeapAlloc/HeapFree, exits 7).
-#[cfg(feature = "conformance_heap")]
+#[cfg(all(feature = "conformance_heap", not(feature = "conformance_crt")))]
 static CONFORMANCE_EXE: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/conformance_heap.exe"));
 
 pub fn run() -> ! {

@@ -91,6 +91,30 @@ fn build_exe(
         .ok_or_else(|| format!("{name}.exe nao foi gerado"))
 }
 
+/// Compiles `conformance/crt/hello.c` WITH the static MSVC CRT (`/MT /GS-`, default
+/// `mainCRTStartup` entry, libcmt) into `target/conformance/crt/hello.exe`.
+fn build_crt_exe(vcvars: &Path, root: &Path) -> crate::Result<PathBuf> {
+    let outdir = root.join("target").join("conformance").join("crt");
+    std::fs::create_dir_all(&outdir).map_err(|e| e.to_string())?;
+    let src = root.join("conformance").join("crt").join("hello.c");
+    let bat = outdir.join("build-crt.bat");
+    let script = format!(
+        "@echo off\r\n\
+         call \"{vcvars}\" >nul || exit /b 1\r\n\
+         cd /d \"{outdir}\" || exit /b 1\r\n\
+         cl /nologo /MT /GS- \"{src}\" /link /nologo /OUT:hello.exe || exit /b 1\r\n",
+        vcvars = vcvars.display(),
+        outdir = outdir.display(),
+        src = src.display(),
+    );
+    std::fs::write(&bat, script).map_err(|e| e.to_string())?;
+    run(Command::new("cmd").arg("/C").arg(&bat))?;
+    let exe = outdir.join("hello.exe");
+    exe.is_file()
+        .then_some(exe)
+        .ok_or_else(|| "crt/hello.exe nao foi gerado".to_string())
+}
+
 /// One case: run `exe` on the real Windows, boot the kernel built with `features`, compare.
 fn run_case(label: &str, exe: &Path, features: &[&str]) -> crate::Result<()> {
     // Reference: the same binary on the real Windows (binds to the real DLLs).
@@ -168,9 +192,11 @@ pub fn run_conformance() -> crate::Result<()> {
     let hello = build_exe(&vcvars, &root, "hello", "hello", &ntdll_lib)?;
     let hello32 = build_exe(&vcvars, &root, "hello32", "hello32", &k32_lib)?;
     let heap = build_exe(&vcvars, &root, "heap", "heap", &k32_lib)?;
+    let crt = build_crt_exe(&vcvars, &root)?;
     run_case("ntdll", &hello, &["conformance"])?;
     run_case("kernel32", &hello32, &["conformance32"])?;
     run_case("heap", &heap, &["conformance_heap"])?;
+    run_case("crt", &crt, &["conformance_crt"])?;
     Ok(())
 }
 
