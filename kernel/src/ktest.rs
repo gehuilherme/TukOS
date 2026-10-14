@@ -91,6 +91,7 @@ const TESTS: &[(&str, TestFn)] = &[
     ),
     ("translate_user_rejects_huge", translate_user_rejects_huge),
     ("ntdll_embedded_parses", ntdll_embedded_parses),
+    ("kernel32_embedded_parses", kernel32_embedded_parses),
     ("two_modules_no_overlap", two_modules_no_overlap),
     (
         "import_resolve_rejects_bad_iat_slot",
@@ -126,6 +127,41 @@ fn ntdll_embedded_parses() -> Result<(), &'static str> {
     let pe = pe::PeFile::parse(bytes).map_err(|_| "ntdll.dll embutido nao e PE valido")?;
     if pe.export_rva_by_name("NtWriteFile").is_none() {
         return Err("ntdll embutido nao exporta NtWriteFile");
+    }
+    Ok(())
+}
+
+fn kernel32_embedded_parses() -> Result<(), &'static str> {
+    let bytes = crate::kernel32_image::KERNEL32_BYTES;
+    if bytes.is_empty() {
+        return Ok(()); // kernel32 not embedded on this host (no MSVC): skip.
+    }
+    let pe = pe::PeFile::parse(bytes).map_err(|_| "kernel32.dll embutido nao e PE valido")?;
+    for name in ["GetStdHandle", "WriteFile", "ExitProcess"] {
+        if pe.export_rva_by_name(name).is_none() {
+            return Err("kernel32 embutido nao exporta uma das 3 APIs");
+        }
+    }
+    let mut dlls = 0;
+    let imports = pe.imports().map_err(|_| "imports ilegiveis")?;
+    for dll in imports {
+        dlls += 1;
+        if !dll.name.eq_ignore_ascii_case("ntdll.dll") {
+            return Err("kernel32 importa uma DLL que nao e ntdll.dll");
+        }
+        let (mut wf, mut tp) = (false, false);
+        for t in dll.thunks {
+            if let pe::ImportKind::Name { name: n, .. } = t.kind {
+                wf |= n == "NtWriteFile";
+                tp |= n == "NtTerminateProcess";
+            }
+        }
+        if !(wf && tp) {
+            return Err("kernel32 nao importa NtWriteFile+NtTerminateProcess");
+        }
+    }
+    if dlls != 1 {
+        return Err("kernel32 deve ter exatamente 1 DLL importada");
     }
     Ok(())
 }

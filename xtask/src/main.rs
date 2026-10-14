@@ -3,6 +3,7 @@ use std::process::ExitCode;
 mod conformance;
 mod disk;
 mod image;
+mod kernel32;
 mod ktest;
 mod ntdll;
 mod qemu;
@@ -11,7 +12,7 @@ mod vmware;
 
 pub type Result<T> = std::result::Result<T, String>;
 
-const USAGE: &str = "uso: cargo xtask <build|run|ktest|test|vmware|ntdll|conformance>";
+const USAGE: &str = "uso: cargo xtask <build|run|ktest|test|vmware|ntdll|kernel32|conformance>";
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -22,6 +23,7 @@ fn main() -> ExitCode {
         Some("ktest") => ktest::run_all(),
         Some("conformance") => conformance::run_conformance(),
         Some("ntdll") => ntdll::build().map(|p| println!("ntdll.dll em {}", p.display())),
+        Some("kernel32") => kernel32::build().map(|p| println!("kernel32.dll em {}", p.display())),
         Some("test") => util::run(std::process::Command::new("cargo").args([
             "test",
             "-p",

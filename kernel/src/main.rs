@@ -7,6 +7,7 @@ mod console;
 #[cfg(feature = "conformance")]
 mod conformance;
 mod fbcon;
+mod kernel32_image;
 #[cfg(feature = "ktest")]
 mod ktest;
 mod loader;

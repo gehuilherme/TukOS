@@ -26,6 +26,9 @@ pub fn build(features: &[&str]) -> crate::Result<PathBuf> {
     if let Err(e) = crate::ntdll::build() {
         eprintln!("aviso: ntdll nao compilado ({e}); kernel embute ntdll vazio");
     }
+    if let Err(e) = crate::kernel32::build() {
+        eprintln!("aviso: kernel32 nao compilado ({e}); kernel embute kernel32 vazio");
+    }
     let kernel = build_kernel(&root, features)?;
     let bootx64 = ensure_limine(&root)?;
     let variant = if features.is_empty() {

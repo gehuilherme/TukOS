@@ -24,6 +24,22 @@ fn main() {
         );
         std::fs::write(&out, []).expect("write empty ntdll.dll");
     }
+
+    let out = PathBuf::from(std::env::var("OUT_DIR").unwrap()).join("kernel32.dll");
+    let src = PathBuf::from(&dir)
+        .join("..")
+        .join("target")
+        .join("x86_64-pc-windows-msvc")
+        .join("release")
+        .join("kernel32.dll");
+    println!("cargo:rerun-if-changed={}", src.display());
+    println!("cargo:rerun-if-changed=../crates/kernel32/src");
+    if std::fs::copy(&src, &out).is_err() {
+        println!(
+            "cargo:warning=kernel32.dll not found; embedding empty (run `cargo xtask kernel32` on Windows)"
+        );
+        std::fs::write(&out, []).expect("write empty kernel32.dll");
+    }
 }
 
 // Embed the conformance program built by `cargo xtask conformance` (empty if absent).
