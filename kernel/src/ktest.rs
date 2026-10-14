@@ -25,6 +25,7 @@ const TESTS: &[(&str, TestFn)] = &[
     ("spawned_thread_runs", spawned_thread_runs),
     ("yield_alternates_threads", yield_alternates_threads),
     ("preemption_runs_both_threads", preemption_runs_both_threads),
+    ("rsp0_set_before_user", rsp0_set_before_user),
 ];
 
 fn ist_stacks_installed() -> Result<(), &'static str> {
@@ -312,4 +313,19 @@ fn preemption_runs_both_threads() -> Result<(), &'static str> {
         arch_x86_64::cpu::hlt();
     }
     Err("o timer nao preemptou as threads que nao cedem a CPU")
+}
+
+fn rsp0_set_before_user() -> Result<(), &'static str> {
+    // A kernel stack top we control for this check.
+    static STACK: [u8; 4096] = [0; 4096];
+    let top = (&STACK as *const _ as u64) + 4096;
+    unsafe { arch_x86_64::gdt::set_rsp0(top) };
+    if arch_x86_64::gdt::rsp0() != top {
+        return Err("rsp0 nao refletiu o valor gravado");
+    }
+    // Per-CPU block must be installed (GS base non-zero) by kmain before tests.
+    if arch_x86_64::percpu::gs_base() == 0 {
+        return Err("GS base nao instalado");
+    }
+    Ok(())
 }

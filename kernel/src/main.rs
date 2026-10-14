@@ -48,6 +48,8 @@ pub fn arch_cr3_base() -> u64 {
     arch_x86_64::cpu::read_cr3() & 0x000F_FFFF_FFFF_F000
 }
 
+static PERCPU: arch_x86_64::percpu::PerCpu = arch_x86_64::percpu::PerCpu::new();
+
 #[unsafe(no_mangle)]
 unsafe extern "C" fn kmain() -> ! {
     serial::init();
@@ -56,6 +58,7 @@ unsafe extern "C" fn kmain() -> ! {
     unsafe {
         arch_x86_64::gdt::init();
         arch_x86_64::idt::init();
+        arch_x86_64::percpu::install(&PERCPU);
     }
     fbcon::init_from_limine();
     kprintln!("TukOS {} iniciando", env!("CARGO_PKG_VERSION"));

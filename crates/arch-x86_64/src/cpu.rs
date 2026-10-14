@@ -127,3 +127,11 @@ pub unsafe fn write_msr(msr: u32, value: u64) {
         asm!("wrmsr", in("ecx") msr, in("eax") value as u32, in("edx") (value >> 32) as u32, options(nostack, preserves_flags))
     };
 }
+
+/// # Safety
+/// Exchanges GS base with IA32_KERNEL_GS_BASE; only valid at defined kernel/user
+/// transitions, exactly once per transition.
+#[inline]
+pub unsafe fn swapgs() {
+    unsafe { asm!("swapgs", options(nostack, preserves_flags)) };
+}

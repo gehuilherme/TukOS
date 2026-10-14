@@ -10,5 +10,6 @@ pub mod gdt;
 pub mod idt;
 pub mod interrupts;
 pub mod lapic;
+pub mod percpu;
 pub mod port;
 pub mod trap;

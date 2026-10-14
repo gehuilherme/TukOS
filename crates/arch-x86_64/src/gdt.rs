@@ -103,6 +103,22 @@ mod hw {
         ]
     }
 
+    /// # Safety
+    /// Sets the Ring 0 stack pointer used on a privilege change into the kernel.
+    pub unsafe fn set_rsp0(top: u64) {
+        unsafe {
+            let tss = &raw mut TSS;
+            (*tss).rsp[0] = top;
+        }
+    }
+
+    pub fn rsp0() -> u64 {
+        unsafe {
+            let tss = &raw const TSS;
+            (*tss).rsp[0]
+        }
+    }
+
     /// Loads the kernel GDT and TSS and reloads every segment register.
     ///
     /// # Safety
@@ -156,7 +172,7 @@ mod hw {
 }
 
 #[cfg(target_os = "none")]
-pub use hw::{init, ist_tops};
+pub use hw::{init, ist_tops, rsp0, set_rsp0};
 
 #[cfg(test)]
 mod tests {
