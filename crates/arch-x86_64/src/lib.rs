@@ -4,6 +4,7 @@
 //! `target_os = "none"`.
 #![cfg_attr(not(test), no_std)]
 
+pub mod context;
 pub mod cpu;
 pub mod gdt;
 pub mod idt;

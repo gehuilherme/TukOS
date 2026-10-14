@@ -10,6 +10,7 @@ mod ktest;
 mod mem;
 mod panic;
 mod qemu;
+mod sched;
 mod serial;
 mod trap;
 
@@ -65,6 +66,7 @@ unsafe extern "C" fn kmain() -> ! {
 
     mem::init();
     kprintln!("memoria: {} frames livres", mem::frames::free_frame_count());
+    sched::init();
     apic::init();
     arch_x86_64::interrupts::enable();
     kprintln!(

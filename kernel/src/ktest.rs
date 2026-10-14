@@ -2,6 +2,8 @@
 
 extern crate alloc;
 
+use core::sync::atomic::{AtomicU64, Ordering};
+
 type TestFn = fn() -> Result<(), &'static str>;
 
 const TESTS: &[(&str, TestFn)] = &[
@@ -20,6 +22,9 @@ const TESTS: &[(&str, TestFn)] = &[
     ("heap_box_and_vec", heap_box_and_vec),
     ("ist_stacks_installed", ist_stacks_installed),
     ("timer_ticks_advance", timer_ticks_advance),
+    ("spawned_thread_runs", spawned_thread_runs),
+    ("yield_alternates_threads", yield_alternates_threads),
+    ("preemption_runs_both_threads", preemption_runs_both_threads),
 ];
 
 fn ist_stacks_installed() -> Result<(), &'static str> {
@@ -168,7 +173,6 @@ fn idt_loaded() -> Result<(), &'static str> {
 }
 
 fn breakpoint_returns() -> Result<(), &'static str> {
-    use core::sync::atomic::Ordering;
     let before = crate::trap::BREAKPOINTS.load(Ordering::SeqCst);
     arch_x86_64::cpu::int3();
     let after = crate::trap::BREAKPOINTS.load(Ordering::SeqCst);
@@ -231,7 +235,6 @@ fn fbcon_draws_glyph() -> Result<(), &'static str> {
 }
 
 fn timer_ticks_advance() -> Result<(), &'static str> {
-    use core::sync::atomic::Ordering;
     let start = crate::apic::TICKS.load(Ordering::SeqCst);
     // Wait for several ticks; hlt sleeps until the next interrupt.
     for _ in 0..1000 {
@@ -241,4 +244,72 @@ fn timer_ticks_advance() -> Result<(), &'static str> {
         arch_x86_64::cpu::hlt();
     }
     Err("timer nao avancou 5 ticks")
+}
+
+static RAN: AtomicU64 = AtomicU64::new(0);
+static PING: AtomicU64 = AtomicU64::new(0);
+static SPIN_A: AtomicU64 = AtomicU64::new(0);
+static SPIN_B: AtomicU64 = AtomicU64::new(0);
+
+fn mark_ran() {
+    RAN.store(1, Ordering::SeqCst);
+    loop {
+        crate::sched::yield_now();
+    }
+}
+
+fn spawned_thread_runs() -> Result<(), &'static str> {
+    crate::sched::spawn(mark_ran);
+    for _ in 0..100 {
+        if RAN.load(Ordering::SeqCst) == 1 {
+            return Ok(());
+        }
+        crate::sched::yield_now();
+    }
+    Err("thread criada nunca executou")
+}
+
+fn ping() {
+    loop {
+        PING.fetch_add(1, Ordering::SeqCst);
+        crate::sched::yield_now();
+    }
+}
+
+fn yield_alternates_threads() -> Result<(), &'static str> {
+    crate::sched::spawn(ping);
+    let before = PING.load(Ordering::SeqCst);
+    for _ in 0..10 {
+        crate::sched::yield_now();
+    }
+    if PING.load(Ordering::SeqCst) > before {
+        Ok(())
+    } else {
+        Err("yield_now nao passou a CPU para a outra thread")
+    }
+}
+
+fn spin_a() {
+    loop {
+        SPIN_A.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+fn spin_b() {
+    loop {
+        SPIN_B.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+fn preemption_runs_both_threads() -> Result<(), &'static str> {
+    crate::sched::spawn(spin_a);
+    crate::sched::spawn(spin_b);
+    // Neither thread yields; only the timer can make both progress.
+    for _ in 0..2000 {
+        if SPIN_A.load(Ordering::SeqCst) > 0 && SPIN_B.load(Ordering::SeqCst) > 0 {
+            return Ok(());
+        }
+        arch_x86_64::cpu::hlt();
+    }
+    Err("o timer nao preemptou as threads que nao cedem a CPU")
 }
