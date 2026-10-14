@@ -38,19 +38,14 @@ pub fn init() {
 /// Reads stack argument `index` (0-based beyond the 4 register args) of a
 /// Windows x64 syscall: `[user_rsp + 0x28 + index*8]` (return slot + 32-byte shadow).
 pub fn stack_arg(user_rsp: u64, index: u64) -> Option<u64> {
-    let addr = user_rsp.checked_add(0x28)?.checked_add(index.checked_mul(8)?)?;
+    let addr = user_rsp
+        .checked_add(0x28)?
+        .checked_add(index.checked_mul(8)?)?;
     let bytes = crate::usercopy::copy_from_user(addr, 8)?;
     Some(u64::from_le_bytes(bytes.as_slice().try_into().ok()?))
 }
 
-pub extern "C" fn dispatch(
-    nr: u64,
-    a0: u64,
-    a1: u64,
-    a2: u64,
-    _a3: u64,
-    _user_rsp: u64,
-) -> u64 {
+pub extern "C" fn dispatch(nr: u64, a0: u64, a1: u64, a2: u64, _a3: u64, _user_rsp: u64) -> u64 {
     match nr {
         SYS_WRITE_MARK => {
             LAST_MARK.store(a0, Ordering::SeqCst);

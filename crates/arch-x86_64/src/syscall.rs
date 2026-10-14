@@ -51,7 +51,8 @@ mod hw {
         if raw == 0 {
             return u64::MAX;
         }
-        let f: extern "C" fn(u64, u64, u64, u64, u64, u64) -> u64 = unsafe { core::mem::transmute(raw) };
+        let f: extern "C" fn(u64, u64, u64, u64, u64, u64) -> u64 =
+            unsafe { core::mem::transmute(raw) };
         f(nr, a0, a1, a2, a3, user_rsp)
     }
 }
