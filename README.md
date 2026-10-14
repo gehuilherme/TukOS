@@ -19,6 +19,7 @@ Sistema operacional escrito do zero em Rust, com o objetivo de rodar aplicativos
 | `cargo xtask build` | compila o kernel e monta a partição EFI em `target/esp-default/` |
 | `cargo xtask run` | dá boot no QEMU com a serial no terminal |
 | `cargo xtask ktest` | roda os autotestes do kernel no QEMU |
+| `cargo xtask vmware` | dá boot no VMware Workstation (janela visível) e mostra a serial; `TUKOS_VMRUN` aponta o `vmrun` se não estiver no caminho padrão |
 | `cargo xtask test` | roda os testes unitários no host |
 
 Variáveis opcionais: `TUKOS_QEMU` (caminho do `qemu-system-x86_64`) e `TUKOS_OVMF` (caminho do firmware OVMF). `TUKOS_HEADLESS=1` roda o QEMU sem janela; a CI já roda sem janela via `CI`.
