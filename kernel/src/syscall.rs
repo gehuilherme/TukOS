@@ -9,10 +9,12 @@ pub const SYS_WRITE_MARK: u64 = 1;
 
 pub const NT_WRITE_FILE: u64 = 2;
 pub const NT_TERMINATE_PROCESS: u64 = 3;
+pub const NT_CLOSE: u64 = 4;
 #[cfg(feature = "ktest")]
 pub const SYS_SUM6: u64 = 100;
 pub const STATUS_SUCCESS: u64 = 0;
 pub const STATUS_ACCESS_VIOLATION: u64 = 0xC000_0005;
+pub const STATUS_INVALID_HANDLE: u64 = 0xC000_0008;
 
 #[cfg(feature = "ktest")]
 pub static LAST_WRITE_LEN: AtomicU64 = AtomicU64::new(0);
@@ -45,6 +47,45 @@ pub fn stack_arg(user_rsp: u64, index: u64) -> Option<u64> {
     Some(u64::from_le_bytes(bytes.as_slice().try_into().ok()?))
 }
 
+/// Core of NtWriteFile once the stack arguments are decoded.
+fn nt_write_file(handle: u64, iosb: u64, buf: u64, len: u64) -> u64 {
+    let obj = crate::sched::with_current_handles(|t| t.get(handle).cloned()).flatten();
+    if obj != Some(crate::object::Object::Console) {
+        return STATUS_INVALID_HANDLE;
+    }
+    let Some(bytes) = crate::usercopy::copy_from_user(buf, len) else {
+        return STATUS_ACCESS_VIOLATION;
+    };
+    if let Ok(s) = core::str::from_utf8(&bytes) {
+        crate::kprint!("{s}");
+    }
+    #[cfg(feature = "ktest")]
+    {
+        let mut g = LAST_WRITE.lock();
+        let n = core::cmp::min(bytes.len(), 64);
+        g[..n].copy_from_slice(&bytes[..n]);
+        drop(g);
+        LAST_WRITE_LEN.store(bytes.len() as u64, Ordering::SeqCst);
+    }
+    // IO_STATUS_BLOCK (x64) is { union { NTSTATUS Status; PVOID Pointer; }; ULONG_PTR
+    // Information; }. Simplification: Status is stored as a full u64 (low 4 bytes =
+    // NTSTATUS, high 4 = 0) at offset 0, Information as u64 at offset 8.
+    let mut block = [0u8; 16];
+    block[..8].copy_from_slice(&STATUS_SUCCESS.to_le_bytes());
+    block[8..].copy_from_slice(&len.to_le_bytes());
+    if !crate::usercopy::copy_to_user(iosb, &block) {
+        return STATUS_ACCESS_VIOLATION;
+    }
+    STATUS_SUCCESS
+}
+
+/// Test hook: runs NtWriteFile's handle resolution for `handle` with an empty
+/// buffer, without needing a user process.
+#[cfg(feature = "ktest")]
+pub fn ntwritefile_for_test(handle: u64, _a1: u64, _a2: u64, _a3: u64) -> u64 {
+    nt_write_file(handle, 0, 0, 0)
+}
+
 pub extern "C" fn dispatch(nr: u64, a0: u64, a1: u64, a2: u64, _a3: u64, _user_rsp: u64) -> u64 {
     match nr {
         SYS_WRITE_MARK => {
@@ -65,25 +106,22 @@ pub extern "C" fn dispatch(nr: u64, a0: u64, a1: u64, a2: u64, _a3: u64, _user_r
             a0
         }
         NT_WRITE_FILE => {
-            // a0 = handle (console, ignored for now), a1 = buffer, a2 = length.
-            match crate::usercopy::copy_from_user(a1, a2) {
-                Some(bytes) => {
-                    if let Ok(s) = core::str::from_utf8(&bytes) {
-                        crate::kprint!("{s}");
-                    }
-                    #[cfg(feature = "ktest")]
-                    {
-                        let mut g = LAST_WRITE.lock();
-                        let n = core::cmp::min(bytes.len(), 64);
-                        g[..n].copy_from_slice(&bytes[..n]);
-                        drop(g);
-                        LAST_WRITE_LEN.store(bytes.len() as u64, Ordering::SeqCst);
-                    }
-                    STATUS_SUCCESS
-                }
-                None => STATUS_ACCESS_VIOLATION,
-            }
+            // NtWriteFile(FileHandle, Event, ApcRoutine, ApcContext, IoStatusBlock,
+            // Buffer, Length, ByteOffset, Key): a0..a3 in registers, the rest on the
+            // user stack. Event/Apc*/ByteOffset/Key are ignored in this phase.
+            let (Some(iosb), Some(buf), Some(len)) = (
+                stack_arg(_user_rsp, 0),
+                stack_arg(_user_rsp, 1),
+                stack_arg(_user_rsp, 2),
+            ) else {
+                return STATUS_ACCESS_VIOLATION;
+            };
+            nt_write_file(a0, iosb, buf, len)
         }
+        NT_CLOSE => match crate::sched::with_current_handles(|t| t.close(a0)) {
+            Some(true) => STATUS_SUCCESS,
+            _ => STATUS_INVALID_HANDLE,
+        },
         NT_TERMINATE_PROCESS => {
             if crate::sched::current_is_user() {
                 crate::sched::exit_current();

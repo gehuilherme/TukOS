@@ -69,6 +69,8 @@ const TESTS: &[(&str, TestFn)] = &[
     ),
     ("ntwritefile_rejects_unmapped", ntwritefile_rejects_unmapped),
     ("nt_terminate_exits_and_reaps", nt_terminate_exits_and_reaps),
+    ("ntwritefile_fills_iosb", ntwritefile_fills_iosb),
+    ("ntwritefile_bad_handle", ntwritefile_bad_handle),
     ("two_user_processes_preempt", two_user_processes_preempt),
     ("reloc_dir64_crosses_page", reloc_dir64_crosses_page),
     ("stack_placed_above_image", stack_placed_above_image),
@@ -738,6 +740,44 @@ fn nt_terminate_exits_and_reaps() -> Result<(), &'static str> {
         }
     }
     Err("NtTerminateProcess nao recuperou os frames")
+}
+
+fn ntwritefile_fills_iosb() -> Result<(), &'static str> {
+    use core::sync::atomic::Ordering;
+    crate::syscall::LAST_WRITE_LEN.store(0, Ordering::SeqCst);
+    crate::syscall::LAST_MARK.store(0, Ordering::SeqCst);
+    // The test PE calls NtWriteFile(CONSOLE_HANDLE, 0,0,0, &iosb, "TukOS\n", 6, 0, 0),
+    // then reads iosb.Information back and reports it via SYS_WRITE_MARK before exit.
+    crate::process::spawn_ntwrite_real_pe();
+    for _ in 0..8000 {
+        crate::sched::yield_now();
+        if crate::syscall::LAST_WRITE_LEN.load(Ordering::SeqCst) == 6
+            && crate::syscall::last_write_is(b"TukOS\n")
+        {
+            // Wait for the mark (process reports iosb.Information after the write).
+            for _ in 0..8000 {
+                if crate::syscall::LAST_MARK.load(Ordering::SeqCst) == 6 {
+                    return Ok(());
+                }
+                crate::sched::yield_now();
+            }
+            return Err("IoStatusBlock.Information != Length");
+        }
+    }
+    Err("NtWriteFile real nao executou")
+}
+
+fn ntwritefile_bad_handle() -> Result<(), &'static str> {
+    use core::sync::atomic::Ordering;
+    crate::syscall::LAST_WRITE_LEN.store(0, Ordering::SeqCst);
+    let status = crate::syscall::ntwritefile_for_test(0x9999, 0, 0, 0);
+    if status != crate::syscall::STATUS_INVALID_HANDLE {
+        return Err("handle invalido deveria dar STATUS_INVALID_HANDLE");
+    }
+    if crate::syscall::LAST_WRITE_LEN.load(Ordering::SeqCst) != 0 {
+        return Err("handle invalido nao deveria escrever");
+    }
+    Ok(())
 }
 
 fn two_user_processes_preempt() -> Result<(), &'static str> {
