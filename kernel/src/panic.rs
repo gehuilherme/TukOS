@@ -37,6 +37,11 @@ fn print_backtrace(serial: &mut crate::serial::Serial) {
         if rbp == 0 || rbp & 0x7 != 0 {
             break;
         }
+        // Stay in the canonical higher half (stack, HHDM, image): a wild rbp
+        // must not be dereferenced inside the panic handler.
+        if rbp < 0xffff_8000_0000_0000 {
+            break;
+        }
         // frame: [rbp] = saved rbp, [rbp+8] = return address
         let saved_rbp = unsafe { core::ptr::read_volatile(rbp as *const u64) };
         let ret = unsafe { core::ptr::read_volatile((rbp + 8) as *const u64) };
