@@ -41,6 +41,11 @@ static _START_MARKER: RequestsStartMarker = RequestsStartMarker::new();
 #[unsafe(link_section = ".requests_end_marker")]
 static _END_MARKER: RequestsEndMarker = RequestsEndMarker::new();
 
+/// Physical base of the active PML4 (CR3 with flag bits cleared).
+pub fn arch_cr3_base() -> u64 {
+    arch_x86_64::cpu::read_cr3() & 0x000F_FFFF_FFFF_F000
+}
+
 #[unsafe(no_mangle)]
 unsafe extern "C" fn kmain() -> ! {
     serial::init();

@@ -13,7 +13,56 @@ const TESTS: &[(&str, TestFn)] = &[
     ("breakpoint_returns", breakpoint_returns),
     ("fbcon_draws_glyph", fbcon_draws_glyph),
     ("frame_alloc_roundtrip", frame_alloc_roundtrip),
+    ("map_translate_unmap", map_translate_unmap),
+    ("map_creates_missing_tables", map_creates_missing_tables),
 ];
+
+fn map_translate_unmap() -> Result<(), &'static str> {
+    use mm::paging::PageFlags;
+    let phys = crate::mem::frames::alloc_frame().ok_or("sem frame")?;
+    // A free slot in the non-canonical-safe test window well above the kernel heap.
+    let virt = 0xffff_f000_0000_0000u64;
+    let flags = PageFlags::PRESENT.union(PageFlags::WRITABLE).union(PageFlags::NO_EXECUTE);
+    unsafe { crate::mem::paging::map_page(virt, phys, flags).map_err(|_| "map falhou")? };
+    if crate::mem::paging::translate(virt) != Some(phys) {
+        return Err("translate nao devolveu o frame mapeado");
+    }
+    unsafe {
+        core::ptr::write_volatile(virt as *mut u64, 0x1122_3344_5566_7788);
+        if core::ptr::read_volatile(virt as *const u64) != 0x1122_3344_5566_7788 {
+            return Err("pagina mapeada nao e gravavel");
+        }
+    }
+    unsafe { crate::mem::paging::unmap_page(virt).map_err(|_| "unmap falhou")? };
+    if crate::mem::paging::translate(virt).is_some() {
+        return Err("translate ainda resolve apos unmap");
+    }
+    crate::mem::frames::free_frame(phys);
+    Ok(())
+}
+
+fn map_creates_missing_tables() -> Result<(), &'static str> {
+    use mm::paging::PageFlags;
+    let before = crate::mem::frames::free_frame_count();
+    let phys = crate::mem::frames::alloc_frame().ok_or("sem frame")?;
+    // An address whose P3/P2/P1 tables certainly do not exist yet.
+    let virt = 0xffff_e800_0000_0000u64;
+    unsafe {
+        crate::mem::paging::map_page(virt, phys, PageFlags::PRESENT.union(PageFlags::WRITABLE))
+            .map_err(|_| "map falhou ao criar tabelas")?;
+    }
+    if crate::mem::paging::translate(virt) != Some(phys) {
+        return Err("tabelas intermediarias nao foram criadas corretamente");
+    }
+    unsafe { crate::mem::paging::unmap_page(virt).map_err(|_| "unmap falhou")? };
+    crate::mem::frames::free_frame(phys);
+    // map consumed frames for the intermediate tables; we don't require them back,
+    // but the count must not have grown.
+    if crate::mem::frames::free_frame_count() > before {
+        return Err("contagem de frames livres cresceu inesperadamente");
+    }
+    Ok(())
+}
 
 fn frame_alloc_roundtrip() -> Result<(), &'static str> {
     let before = crate::mem::frames::free_frame_count();

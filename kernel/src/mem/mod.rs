@@ -1,6 +1,7 @@
 //! Kernel memory management: physical frames, paging and the heap.
 
 pub mod frames;
+pub mod paging;
 
 /// Reads the Limine HHDM and memory-map responses and brings up the frame allocator.
 pub fn init() {

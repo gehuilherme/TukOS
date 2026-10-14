@@ -73,3 +73,24 @@ pub unsafe fn lgdt(p: &DescriptorTablePointer) {
 pub unsafe fn lidt(p: &DescriptorTablePointer) {
     unsafe { asm!("lidt [{}]", in(reg) p, options(readonly, nostack, preserves_flags)) };
 }
+
+#[inline]
+pub fn read_cr3() -> u64 {
+    let v: u64;
+    unsafe { asm!("mov {}, cr3", out(reg) v, options(nomem, nostack, preserves_flags)) };
+    v
+}
+
+/// # Safety
+/// `phys` must point at a valid PML4 for the current address space.
+#[inline]
+pub unsafe fn write_cr3(phys: u64) {
+    unsafe { asm!("mov cr3, {}", in(reg) phys, options(nostack, preserves_flags)) };
+}
+
+/// # Safety
+/// Invalidates the TLB entry for `virt`; always safe to call, `unsafe` only for symmetry.
+#[inline]
+pub unsafe fn invlpg(virt: u64) {
+    unsafe { asm!("invlpg [{}]", in(reg) virt, options(nostack, preserves_flags)) };
+}
