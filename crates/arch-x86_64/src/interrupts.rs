@@ -19,6 +19,15 @@ pub fn enable() {
     crate::cpu::sti();
 }
 
+/// Masks every line of both legacy 8259 PICs (OCW1, slave then master), so only
+/// the LAPIC delivers interrupts. Intel 8259A datasheet; SDM Vol. 3A ch.10.
+pub fn mask_legacy_pic() {
+    unsafe {
+        crate::port::outb(0xA1, 0xFF);
+        crate::port::outb(0x21, 0xFF);
+    }
+}
+
 pub fn disable() {
     crate::cpu::cli();
 }

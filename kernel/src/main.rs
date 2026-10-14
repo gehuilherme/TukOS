@@ -68,6 +68,7 @@ unsafe extern "C" fn kmain() -> ! {
     kprintln!("memoria: {} frames livres", mem::frames::free_frame_count());
     sched::init();
     apic::init();
+    arch_x86_64::interrupts::mask_legacy_pic();
     arch_x86_64::interrupts::enable();
     kprintln!(
         "interrupcoes ligadas (timer no vetor {})",

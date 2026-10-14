@@ -24,7 +24,11 @@ pub fn eoi() {
 }
 
 pub fn init() {
-    let base = apic_base_phys(unsafe { arch_x86_64::cpu::read_msr(IA32_APIC_BASE) });
+    let msr = unsafe { arch_x86_64::cpu::read_msr(IA32_APIC_BASE) };
+    if msr & (1 << 10) != 0 {
+        panic!("LAPIC em modo x2APIC; TukOS so suporta xAPIC via MMIO neste estagio");
+    }
+    let base = apic_base_phys(msr);
     let flags = PageFlags::WRITABLE
         .union(PageFlags::NO_EXECUTE)
         .union(PageFlags::CACHE_DISABLE);
