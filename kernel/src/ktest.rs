@@ -18,7 +18,26 @@ const TESTS: &[(&str, TestFn)] = &[
     ("map_translate_unmap", map_translate_unmap),
     ("map_creates_missing_tables", map_creates_missing_tables),
     ("heap_box_and_vec", heap_box_and_vec),
+    ("ist_stacks_installed", ist_stacks_installed),
 ];
+
+fn ist_stacks_installed() -> Result<(), &'static str> {
+    use arch_x86_64::{gdt, idt};
+    let tops = gdt::ist_tops();
+    if tops.iter().any(|&t| t == 0 || t % 16 != 0) {
+        return Err("topo de pilha IST nulo ou desalinhado");
+    }
+    if tops[0] == tops[1] || tops[1] == tops[2] || tops[0] == tops[2] {
+        return Err("pilhas IST compartilhadas");
+    }
+    if idt::entry(8).ist != gdt::IST_DOUBLE_FAULT
+        || idt::entry(2).ist != gdt::IST_NMI
+        || idt::entry(18).ist != gdt::IST_MACHINE_CHECK
+    {
+        return Err("vetores 8/2/18 nao apontam para a IST correta");
+    }
+    Ok(())
+}
 
 fn heap_box_and_vec() -> Result<(), &'static str> {
     use alloc::boxed::Box;

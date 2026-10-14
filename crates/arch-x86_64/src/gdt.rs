@@ -15,6 +15,10 @@ pub const USER_DATA: u64 = 0x00CF_F200_0000_FFFF;
 /// 64-bit code, DPL 3, present.
 pub const USER_CODE: u64 = 0x00AF_FA00_0000_FFFF;
 
+pub const IST_DOUBLE_FAULT: u8 = 1;
+pub const IST_NMI: u8 = 2;
+pub const IST_MACHINE_CHECK: u8 = 3;
+
 #[repr(C, packed(4))]
 #[derive(Clone, Copy)]
 pub struct Tss {
@@ -38,6 +42,12 @@ impl Tss {
             _reserved3: 0,
             iomap_base: core::mem::size_of::<Tss>() as u16,
         }
+    }
+
+    pub const fn with_ists(ist1: u64, ist2: u64, ist3: u64) -> Self {
+        let mut tss = Self::new();
+        tss.ist = [ist1, ist2, ist3, 0, 0, 0, 0];
+        tss
     }
 
     pub const fn with_ist1(top: u64) -> Self {
@@ -72,14 +82,26 @@ mod hw {
     use core::arch::asm;
     use core::mem::size_of;
 
-    const DF_STACK_SIZE: usize = 16 * 1024;
+    const IST_STACK_SIZE: usize = 16 * 1024;
 
     #[repr(C, align(16))]
-    struct Stack([u8; DF_STACK_SIZE]);
+    struct Stack([u8; IST_STACK_SIZE]);
 
-    static mut DF_STACK: Stack = Stack([0; DF_STACK_SIZE]);
+    static mut DF_STACK: Stack = Stack([0; IST_STACK_SIZE]);
+    static mut NMI_STACK: Stack = Stack([0; IST_STACK_SIZE]);
+    static mut MC_STACK: Stack = Stack([0; IST_STACK_SIZE]);
     static mut TSS: Tss = Tss::new();
     static mut GDT: [u64; 7] = [0; 7];
+
+    /// Top addresses of the IST stacks: double fault, NMI, machine check.
+    pub fn ist_tops() -> [u64; 3] {
+        let top = |base: u64| base + IST_STACK_SIZE as u64;
+        [
+            top((&raw const DF_STACK) as u64),
+            top((&raw const NMI_STACK) as u64),
+            top((&raw const MC_STACK) as u64),
+        ]
+    }
 
     /// Loads the kernel GDT and TSS and reloads every segment register.
     ///
@@ -87,9 +109,9 @@ mod hw {
     /// Must run once, on the boot CPU, before interrupts are enabled.
     pub unsafe fn init() {
         unsafe {
-            let df_top = (&raw const DF_STACK) as u64 + DF_STACK_SIZE as u64;
+            let [df_top, nmi_top, mc_top] = ist_tops();
             let tss = &raw mut TSS;
-            tss.write(Tss::with_ist1(df_top));
+            tss.write(Tss::with_ists(df_top, nmi_top, mc_top));
 
             let [tss_lo, tss_hi] = tss_descriptor(tss as u64, (size_of::<Tss>() - 1) as u32);
             let gdt = &raw mut GDT;
@@ -134,7 +156,7 @@ mod hw {
 }
 
 #[cfg(target_os = "none")]
-pub use hw::init;
+pub use hw::{init, ist_tops};
 
 #[cfg(test)]
 mod tests {
@@ -175,6 +197,21 @@ mod tests {
         let [lo, hi] = tss_descriptor(0x1122_3344_5566_7788, 0x67);
         assert_eq!(lo, 0x5500_8966_7788_0067);
         assert_eq!(hi, 0x1122_3344);
+    }
+
+    #[test]
+    fn with_ists_sets_first_three_slots() {
+        let tss = Tss::with_ists(0x1000, 0x2000, 0x3000);
+        let ist = tss.ist;
+        assert_eq!(&ist[..3], &[0x1000, 0x2000, 0x3000]);
+        assert!(ist[3..].iter().all(|&v| v == 0));
+    }
+
+    #[test]
+    fn ist_indices_are_distinct_and_one_based() {
+        assert_eq!(IST_DOUBLE_FAULT, 1);
+        assert_eq!(IST_NMI, 2);
+        assert_eq!(IST_MACHINE_CHECK, 3);
     }
 
     #[test]

@@ -47,12 +47,14 @@ mod hw {
     use crate::cpu::{self, DescriptorTablePointer};
     use crate::gdt::KERNEL_CS;
 
-    const DOUBLE_FAULT: usize = 8;
-
     static mut IDT: [IdtEntry; 256] = [IdtEntry::MISSING; 256];
 
     pub fn table_address() -> u64 {
         (&raw const IDT) as u64
+    }
+
+    pub fn entry(vector: usize) -> IdtEntry {
+        unsafe { (&raw const IDT).cast::<IdtEntry>().add(vector).read() }
     }
 
     /// Installs the exception vectors 0..32 and loads the IDT.
@@ -63,7 +65,12 @@ mod hw {
         unsafe {
             let idt = &raw mut IDT;
             for (vector, &stub) in crate::trap::tukos_isr_table.iter().enumerate() {
-                let ist = if vector == DOUBLE_FAULT { 1 } else { 0 };
+                let ist = match vector {
+                    8 => crate::gdt::IST_DOUBLE_FAULT,
+                    2 => crate::gdt::IST_NMI,
+                    18 => crate::gdt::IST_MACHINE_CHECK,
+                    _ => 0,
+                };
                 (*idt)[vector] = IdtEntry::new(stub, KERNEL_CS, ist, 0);
             }
             let ptr = DescriptorTablePointer {
@@ -76,7 +83,7 @@ mod hw {
 }
 
 #[cfg(target_os = "none")]
-pub use hw::{init, table_address};
+pub use hw::{entry, init, table_address};
 
 #[cfg(test)]
 mod tests {
