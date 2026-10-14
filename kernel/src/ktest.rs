@@ -1,5 +1,7 @@
 //! In-kernel self-tests, built only with the `ktest` feature.
 
+extern crate alloc;
+
 type TestFn = fn() -> Result<(), &'static str>;
 
 const TESTS: &[(&str, TestFn)] = &[
@@ -15,7 +17,26 @@ const TESTS: &[(&str, TestFn)] = &[
     ("frame_alloc_roundtrip", frame_alloc_roundtrip),
     ("map_translate_unmap", map_translate_unmap),
     ("map_creates_missing_tables", map_creates_missing_tables),
+    ("heap_box_and_vec", heap_box_and_vec),
 ];
+
+fn heap_box_and_vec() -> Result<(), &'static str> {
+    use alloc::boxed::Box;
+    use alloc::vec::Vec;
+    let b = Box::new(0xDEAD_BEEF_u64);
+    if *b != 0xDEAD_BEEF {
+        return Err("Box nao preservou o valor");
+    }
+    let mut v: Vec<u64> = Vec::new();
+    for i in 0..1000 {
+        v.push(i);
+    }
+    if v.iter().sum::<u64>() != (0..1000).sum() {
+        return Err("Vec corrompeu dados ao crescer");
+    }
+    Ok(())
+}
+
 
 fn map_translate_unmap() -> Result<(), &'static str> {
     use mm::paging::PageFlags;
