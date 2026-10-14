@@ -1,5 +1,7 @@
 use std::process::ExitCode;
 
+mod qemu;
+
 pub type Result<T> = std::result::Result<T, String>;
 
 const USAGE: &str = "uso: cargo xtask <build|run|ktest|test>";
