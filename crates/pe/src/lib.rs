@@ -103,6 +103,46 @@ impl<'a> Iterator for ImportIter<'a> {
     }
 }
 
+/// An export resolved with forwarder detection (see `PeFile::resolve_export_ex`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Resolved<'a> {
+    /// The export is code/data at this RVA inside the module.
+    Rva(u32),
+    /// The export is a forwarder: the ASCII string `"OTHERDLL.Func"` or
+    /// `"OTHERDLL.#ord"` (feed it to `split_forwarder`).
+    Forwarder(&'a str),
+}
+
+/// The target half of a forwarder string.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ForwardTarget<'a> {
+    Name(&'a str),
+    Ordinal(u16),
+}
+
+/// Splits a forwarder string at its FIRST `.` into `(dll, target)`:
+/// `"DLL.Func"` -> `("DLL", Name("Func"))`, `"DLL.#42"` -> `("DLL", Ordinal(42))`.
+/// The DLL token is returned as written in the string and normally LACKS the
+/// `.dll` suffix (e.g. `"NTDLL"`); callers should compare it to a module's base
+/// name case-insensitively, with or without the suffix. `None` when there is no
+/// `.`, either side is empty, or a `#ordinal` is not a decimal number in `u16`.
+/// Returns sub-slices of `s`; never allocates.
+pub fn split_forwarder(s: &str) -> Option<(&str, ForwardTarget<'_>)> {
+    let dot = s.find('.')?;
+    let (dll, rest) = (&s[..dot], &s[dot + 1..]);
+    if dll.is_empty() || rest.is_empty() {
+        return None;
+    }
+    if let Some(num) = rest.strip_prefix('#') {
+        if num.is_empty() || !num.bytes().all(|c| c.is_ascii_digit()) {
+            return None;
+        }
+        let ord = num.parse::<u16>().ok()?;
+        return Some((dll, ForwardTarget::Ordinal(ord)));
+    }
+    Some((dll, ForwardTarget::Name(rest)))
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Export<'a> {
     pub name: &'a str,
@@ -535,6 +575,46 @@ impl<'a> PeFile<'a> {
         match entry.kind {
             ImportKind::Name { name, .. } => self.export_rva_by_name(name),
             ImportKind::Ordinal(n) => self.export_rva_by_ordinal(n),
+        }
+    }
+
+    /// Classifies an export RVA: inside `[export_dir_rva, export_dir_rva + size)`
+    /// it is a forwarder string (ASCII, NUL-terminated inside that range and the
+    /// section), otherwise a plain RVA. `None` if the forwarder string is
+    /// unterminated/out of bounds/not UTF-8.
+    fn classify_export(&self, rva: u32) -> Option<Resolved<'a>> {
+        let (dir_rva, dir_size) = self.data_dir(EXPORT_DIR_INDEX);
+        let start = u64::from(dir_rva);
+        let end = start + u64::from(dir_size);
+        let r = u64::from(rva);
+        if dir_size == 0 || r < start || r >= end {
+            return Some(Resolved::Rva(rva));
+        }
+        let t = self.tail_at(rva)?;
+        let max = usize::try_from(end - r).unwrap_or(usize::MAX);
+        let t = &t[..t.len().min(max)];
+        let n = t.iter().position(|&c| c == 0)?;
+        core::str::from_utf8(&t[..n]).ok().map(Resolved::Forwarder)
+    }
+
+    /// Like `export_rva_by_name` but detects forwarders (see `classify_export`).
+    pub fn resolve_export_ex(&self, name: &str) -> Option<Resolved<'a>> {
+        match self.export_rva_by_name(name)? {
+            0 => None,
+            rva => self.classify_export(rva),
+        }
+    }
+
+    /// Like `export_rva_by_ordinal` but detects forwarders.
+    pub fn resolve_export_ordinal_ex(&self, ordinal: u16) -> Option<Resolved<'a>> {
+        self.classify_export(self.export_rva_by_ordinal(ordinal)?)
+    }
+
+    /// Like `resolve_export` but detects forwarders.
+    pub fn resolve_entry_ex(&self, entry: &ImportEntry) -> Option<Resolved<'a>> {
+        match entry.kind {
+            ImportKind::Name { name, .. } => self.resolve_export_ex(name),
+            ImportKind::Ordinal(n) => self.resolve_export_ordinal_ex(n),
         }
     }
 
@@ -991,6 +1071,135 @@ mod tests {
         assert_eq!(f.resolve_export(&by_name), Some(0x1234));
         assert_eq!(f.resolve_export(&by_ord), Some(0x1300));
         assert_eq!(f.resolve_export(&missing), None);
+    }
+
+    /// Two exports, Base=1: "Bar" (ordinal 1) -> code 0x1234; "Fwd" (ordinal 2) ->
+    /// forwarder string "NTDLL.NtFoo" at RVA 0x1080, INSIDE the export directory
+    /// (dir size 0xA0).
+    fn build_pe_with_forwarder(fwd: &[u8]) -> Vec<u8> {
+        let mut b = export_blob();
+        b.resize(0xA0, 0);
+        put(&mut b, 20, &2u32.to_le_bytes()); // NumberOfFunctions
+        put(&mut b, 24, &2u32.to_le_bytes()); // NumberOfNames
+        put(&mut b, 0x44, &0x1080u32.to_le_bytes());
+        put(&mut b, 0x54, &0x1078u32.to_le_bytes());
+        put(&mut b, 0x62, &1u16.to_le_bytes());
+        put(&mut b, 0x78, b"Fwd\0");
+        put(&mut b, 0x80, fwd);
+        let mut pe = build_pe(0x40_0000, 0x1000, &b, b.len() as u32, SCN_MEM_READ);
+        set_dir(&mut pe, EXPORT_DIR_INDEX, 0x1000, 0xA0);
+        pe
+    }
+
+    #[test]
+    fn resolve_export_ex_detects_forwarder_and_code() {
+        let pe = build_pe_with_forwarder(b"NTDLL.NtFoo\0");
+        let f = PeFile::parse(&pe).unwrap();
+        assert_eq!(f.resolve_export_ex("Bar"), Some(Resolved::Rva(0x1234)));
+        assert_eq!(
+            f.resolve_export_ex("Fwd"),
+            Some(Resolved::Forwarder("NTDLL.NtFoo"))
+        );
+        assert_eq!(f.resolve_export_ex("Nope"), None);
+        assert_eq!(
+            f.resolve_export_ordinal_ex(2),
+            Some(Resolved::Forwarder("NTDLL.NtFoo"))
+        );
+        assert_eq!(f.resolve_export_ordinal_ex(1), Some(Resolved::Rva(0x1234)));
+        assert_eq!(f.resolve_export_ordinal_ex(3), None);
+        let by_name = ImportEntry {
+            kind: ImportKind::Name {
+                hint: 0,
+                name: "Fwd",
+            },
+            iat_rva: 0,
+        };
+        let by_ord = ImportEntry {
+            kind: ImportKind::Ordinal(1),
+            iat_rva: 0,
+        };
+        assert_eq!(
+            f.resolve_entry_ex(&by_name),
+            Some(Resolved::Forwarder("NTDLL.NtFoo"))
+        );
+        assert_eq!(f.resolve_entry_ex(&by_ord), Some(Resolved::Rva(0x1234)));
+        // Loaded-image mode behaves the same.
+        let img = to_loaded(&pe);
+        let f = PeFile::parse_loaded(&img).unwrap();
+        assert_eq!(
+            f.resolve_export_ex("Fwd"),
+            Some(Resolved::Forwarder("NTDLL.NtFoo"))
+        );
+    }
+
+    #[test]
+    fn resolve_export_ex_plain_export_is_rva() {
+        let pe = build_pe_with_exports();
+        let f = PeFile::parse(&pe).unwrap();
+        assert_eq!(f.resolve_export_ex("Bar"), Some(Resolved::Rva(0x1234)));
+    }
+
+    #[test]
+    fn resolve_export_ex_unterminated_forwarder_is_none() {
+        // String runs to the end of the export directory with no NUL.
+        let pe = build_pe_with_forwarder(b"NTDLL.AAAAAAAAAAAAAAAAAAAAAAAAAA");
+        let f = PeFile::parse(&pe).unwrap();
+        assert_eq!(f.resolve_export_ex("Fwd"), None);
+        assert_eq!(f.resolve_export_ordinal_ex(2), None);
+        // Non-UTF-8 forwarder bytes.
+        let pe = build_pe_with_forwarder(b"NTDLL.\xFF\xFE\0");
+        let f = PeFile::parse(&pe).unwrap();
+        assert_eq!(f.resolve_export_ex("Fwd"), None);
+    }
+
+    #[test]
+    fn resolve_export_ex_never_panics_on_corruption() {
+        let pe = build_pe_with_forwarder(b"NTDLL.NtFoo\0");
+        for pos in RAW_OFF..pe.len() {
+            for val in [0x00u8, 0xFF, 0x80, 0x41] {
+                let mut m = pe.clone();
+                m[pos] = val;
+                let f = PeFile::parse(&m).unwrap();
+                let _ = f.resolve_export_ex("Fwd");
+                let _ = f.resolve_export_ex("Bar");
+                for o in [0u16, 1, 2, 3, u16::MAX] {
+                    let _ = f.resolve_export_ordinal_ex(o);
+                }
+            }
+        }
+        // Directory header (size field) corruption too.
+        for sz in [0u32, 1, 0x28, 0x80, 0x81, 0xA0, u32::MAX] {
+            let mut m = pe.clone();
+            set_dir(&mut m, EXPORT_DIR_INDEX, 0x1000, sz);
+            let f = PeFile::parse(&m).unwrap();
+            let _ = f.resolve_export_ex("Fwd");
+            let _ = f.resolve_export_ordinal_ex(2);
+        }
+    }
+
+    #[test]
+    fn split_forwarder_name_and_ordinal() {
+        assert_eq!(
+            split_forwarder("DLL.Func"),
+            Some(("DLL", ForwardTarget::Name("Func")))
+        );
+        assert_eq!(
+            split_forwarder("NTDLL.#42"),
+            Some(("NTDLL", ForwardTarget::Ordinal(42)))
+        );
+        // The function name may itself contain dots (split at the FIRST one).
+        assert_eq!(
+            split_forwarder("api-ms-win-core.Foo.Bar"),
+            Some(("api-ms-win-core", ForwardTarget::Name("Foo.Bar")))
+        );
+        assert_eq!(split_forwarder("NoDot"), None);
+        assert_eq!(split_forwarder(""), None);
+        assert_eq!(split_forwarder(".Func"), None);
+        assert_eq!(split_forwarder("DLL."), None);
+        assert_eq!(split_forwarder("DLL.#"), None);
+        assert_eq!(split_forwarder("DLL.#xyz"), None);
+        assert_eq!(split_forwarder("DLL.#70000"), None);
+        assert_eq!(split_forwarder("DLL.#-1"), None);
     }
 
     #[test]
