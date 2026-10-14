@@ -11,17 +11,17 @@ pub struct DescriptorTablePointer {
 
 #[inline]
 pub fn hlt() {
-    unsafe { asm!("hlt", options(nomem, nostack, preserves_flags)) };
+    unsafe { asm!("hlt", options(nostack, preserves_flags)) };
 }
 
 #[inline]
 pub fn cli() {
-    unsafe { asm!("cli", options(nomem, nostack)) };
+    unsafe { asm!("cli", options(nostack)) };
 }
 
 #[inline]
 pub fn int3() {
-    unsafe { asm!("int3", options(nomem, nostack)) };
+    unsafe { asm!("int3", options(nostack)) };
 }
 
 #[inline]
