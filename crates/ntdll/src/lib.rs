@@ -149,6 +149,10 @@ const ST_UNRESOLVED: u32 = 0xC000_7005;
 const ST_BAD_IAT: u32 = 0xC000_7006;
 const ST_BAD_ENTRY: u32 = 0xC000_7007;
 const ST_PANIC: u32 = 0xC000_7008;
+/// An imported DLL (or forwarder target DLL) is not in `PEB->Ldr`.
+const ST_NO_DEP: u32 = 0xC000_7009;
+/// A forwarder chain exceeded `MAX_FORWARD_HOPS` (cycle or absurd depth).
+const ST_FWD_LIMIT: u32 = 0xC000_700A;
 
 /// NtTerminateProcess(status) via syscall; never returns.
 fn die(status: u32) -> ! {
@@ -175,34 +179,104 @@ const ENT_DLL_BASE: usize = 0x30;
 const ENT_SIZE_OF_IMAGE: usize = 0x40;
 const ENT_BASE_NAME_LEN: usize = 0x58;
 const ENT_BASE_NAME_BUF: usize = 0x60;
-const MAX_MODULES: usize = 32;
+const MAX_MODULES: usize = 16;
 
-/// True if the UTF-16 `BaseDllName` of the entry equals `want` (ASCII, case-insensitive).
-///
-/// # Safety
-/// `entry` must point to a readable LDR_DATA_TABLE_ENTRY.
-unsafe fn name_is(entry: *const u8, want: &[u8]) -> bool {
-    unsafe {
-        let len = core::ptr::read(entry.add(ENT_BASE_NAME_LEN) as *const u16) as usize;
-        let buf = core::ptr::read(entry.add(ENT_BASE_NAME_BUF) as *const *const u16);
-        if len != want.len() * 2 || buf.is_null() {
-            return false;
+/// Max forwarder hops followed per import; a longer chain (or a cycle) dies with
+/// `ST_FWD_LIMIT` instead of looping.
+const MAX_FORWARD_HOPS: usize = 8;
+const NAME_CAP: usize = 24;
+
+/// One module of `PEB->Ldr`, as the loader sees it. `name` is the lowercase ASCII
+/// BaseDllName (`nlen` bytes, `.dll` suffix stripped; `nlen == 0` if it is not usable,
+/// which then never matches an import).
+#[derive(Clone, Copy)]
+struct Module {
+    base: usize,
+    size: usize,
+    name: [u8; NAME_CAP],
+    nlen: usize,
+}
+
+const NO_MODULE: Module = Module {
+    base: 0,
+    size: 0,
+    name: [0; NAME_CAP],
+    nlen: 0,
+};
+
+impl Module {
+    /// Parses the module as a LOADED image (sections at their RVAs).
+    ///
+    /// # Safety
+    /// `base..base+size` must be mapped and readable (guaranteed by the kernel's
+    /// `PEB->Ldr` entry).
+    unsafe fn pe(&self) -> Option<PeFile<'static>> {
+        if self.base == 0 || self.size == 0 {
+            return None;
         }
-        let mut i = 0;
-        while i < want.len() {
-            let c = core::ptr::read(buf.add(i));
-            if c > 0x7F || (c as u8).to_ascii_lowercase() != want[i].to_ascii_lowercase() {
-                return false;
-            }
-            i += 1;
-        }
-        true
+        let img = unsafe { core::slice::from_raw_parts(self.base as *const u8, self.size) };
+        PeFile::parse_loaded(img).ok()
     }
 }
 
-/// The 8-byte IAT slot at `rva` must lie entirely inside one section of the loaded
-/// exe that is writable, so a malformed exe can only make us write its own data.
-fn iat_slot_ok(exe: &PeFile, size_of_image: u64, rva: u32) -> bool {
+/// `name` without a trailing `.dll` (ASCII case-insensitive).
+fn strip_dll(name: &[u8]) -> &[u8] {
+    if name.len() >= 4 && name[name.len() - 4..].eq_ignore_ascii_case(b".dll") {
+        &name[..name.len() - 4]
+    } else {
+        name
+    }
+}
+
+/// Index of the module whose base name equals `dll` ("kernel32.dll", "KERNEL32" and
+/// "Kernel32.DLL" all match): ASCII case-insensitive, `.dll` suffix ignored on both sides.
+fn find_module(mods: &[Module], dll: &str) -> Option<usize> {
+    let want = strip_dll(dll.as_bytes());
+    if want.is_empty() {
+        return None;
+    }
+    mods.iter().position(|m| {
+        m.nlen != 0 && m.nlen == want.len() && m.name[..m.nlen].eq_ignore_ascii_case(want)
+    })
+}
+
+/// Reads the UTF-16 `BaseDllName` of an LDR entry into a lowercase, `.dll`-stripped
+/// ASCII buffer. Returns `(buf, len)`; len 0 for names that are empty, non-ASCII or
+/// too long.
+///
+/// # Safety
+/// `entry` must point to a readable LDR_DATA_TABLE_ENTRY.
+unsafe fn read_base_name(entry: *const u8) -> ([u8; NAME_CAP], usize) {
+    unsafe {
+        let mut out = [0u8; NAME_CAP];
+        let bytes = core::ptr::read(entry.add(ENT_BASE_NAME_LEN) as *const u16) as usize;
+        let buf = core::ptr::read(entry.add(ENT_BASE_NAME_BUF) as *const *const u16);
+        let chars = bytes / 2;
+        if buf.is_null() || chars == 0 || chars > NAME_CAP {
+            return (out, 0);
+        }
+        let mut i = 0;
+        while i < chars {
+            let c = core::ptr::read(buf.add(i));
+            if c == 0 || c > 0x7F {
+                return ([0; NAME_CAP], 0);
+            }
+            out[i] = (c as u8).to_ascii_lowercase();
+            i += 1;
+        }
+        let len = strip_dll(&out[..chars]).len();
+        (out, len)
+    }
+}
+
+/// The 8-byte IAT slot at `rva` must lie entirely inside one section of the IMPORTING
+/// module (`importer`, whose SizeOfImage is `size_of_image`) that is non-executable and
+/// writable, or lies in the importer's own declared IAT directory (MSVC's read-only
+/// `.rdata` IAT; the kernel maps those pages writable). This is the per-module
+/// confinement invariant: whichever module's imports are being bound, the loader can
+/// only write inside THAT module's image, never into code, never into another module.
+/// The `!exec` gate holds even if a hostile data directory #12 covers a code section.
+fn iat_slot_ok(importer: &PeFile, size_of_image: u64, rva: u32) -> bool {
     let start = u64::from(rva);
     let Some(end) = start.checked_add(8) else {
         return false;
@@ -210,20 +284,59 @@ fn iat_slot_ok(exe: &PeFile, size_of_image: u64, rva: u32) -> bool {
     if end > size_of_image {
         return false;
     }
-    // A slot is acceptable inside a writable, non-executable section, or inside the
-    // exe's declared IAT directory in a non-executable section (MSVC's read-only
-    // `.rdata` IAT; the kernel maps those pages writable, as the Windows loader does).
-    let (iat_rva, iat_size) = exe.iat_directory();
+    let (iat_rva, iat_size) = importer.iat_directory();
     let iat_start = u64::from(iat_rva);
     let iat_end = iat_start + u64::from(iat_size);
     let in_iat_dir = iat_size != 0 && start >= iat_start && end <= iat_end;
-    exe.sections().any(|s| {
+    importer.sections().any(|s| {
         let s_start = u64::from(s.rva);
         let s_end = s_start + u64::from(s.virtual_size);
         let inside = start >= s_start && end <= s_end;
         let exec = s.characteristics & SCN_MEM_EXECUTE != 0;
         inside && !exec && (s.characteristics & SCN_MEM_WRITE != 0 || in_iat_dir)
     })
+}
+
+/// Resolves `entry` against module `exporter` to an absolute address, chasing
+/// forwarder exports ("DLL.Func" / "DLL.#N") through the module list for at most
+/// `MAX_FORWARD_HOPS` forwards. Err carries the sentinel to die with.
+///
+/// # Safety
+/// Every module in `mods` must describe a mapped, readable image.
+unsafe fn resolve_import(
+    mods: &[Module],
+    exporter: usize,
+    entry: &pe::ImportEntry,
+) -> Result<usize, u32> {
+    let mut idx = exporter;
+    let mut target: Option<pe::ForwardTarget> = None; // None on the first hop: use `entry`
+    let mut hops = 0;
+    loop {
+        let m = mods.get(idx).ok_or(ST_UNRESOLVED)?;
+        let exp = unsafe { m.pe() }.ok_or(ST_BAD_PE)?;
+        let r = match target {
+            None => exp.resolve_entry_ex(entry),
+            Some(pe::ForwardTarget::Name(n)) => exp.resolve_export_ex(n),
+            Some(pe::ForwardTarget::Ordinal(o)) => exp.resolve_export_ordinal_ex(o),
+        };
+        match r.ok_or(ST_UNRESOLVED)? {
+            pe::Resolved::Rva(rva) => {
+                if rva as usize >= m.size {
+                    return Err(ST_UNRESOLVED);
+                }
+                return m.base.checked_add(rva as usize).ok_or(ST_UNRESOLVED);
+            }
+            pe::Resolved::Forwarder(s) => {
+                hops += 1;
+                if hops > MAX_FORWARD_HOPS {
+                    return Err(ST_FWD_LIMIT);
+                }
+                let (dll, t) = pe::split_forwarder(s).ok_or(ST_UNRESOLVED)?;
+                idx = find_module(mods, dll).ok_or(ST_NO_DEP)?;
+                target = Some(t);
+            }
+        }
+    }
 }
 
 /// Rust body of the thunk (the naked entry below aligns the stack first).
@@ -245,72 +358,75 @@ extern "C" fn ldr_main() -> ! {
             die(ST_NO_PEB);
         }
 
-        // Walk InLoadOrderModuleList: first entry is the exe, then find ntdll.dll.
+        // Walk InLoadOrderModuleList into a small fixed array (first entry = the exe).
         let head = (ldr + LDR_IN_LOAD_ORDER) as *const usize;
         let mut cur = core::ptr::read(head) as *const u8;
-        if cur as usize == head as usize || cur.is_null() {
+        if core::ptr::eq(cur, head as *const u8) || cur.is_null() {
             die(ST_NO_EXE);
         }
-        let exe_entry = cur;
-        let mut ntdll_entry: *const u8 = core::ptr::null();
+        let mut mods = [NO_MODULE; MAX_MODULES];
         let mut n = 0;
-        while cur as usize != head as usize && !cur.is_null() && n < MAX_MODULES {
-            if name_is(cur, b"ntdll.dll") {
-                ntdll_entry = cur;
-                break;
-            }
-            cur = core::ptr::read(cur as *const usize) as *const u8;
+        while !core::ptr::eq(cur, head as *const u8) && !cur.is_null() && n < MAX_MODULES {
+            let (name, nlen) = read_base_name(cur);
+            mods[n] = Module {
+                base: core::ptr::read(cur.add(ENT_DLL_BASE) as *const usize),
+                size: core::ptr::read(cur.add(ENT_SIZE_OF_IMAGE) as *const u32) as usize,
+                name,
+                nlen,
+            };
             n += 1;
+            cur = core::ptr::read(cur as *const usize) as *const u8;
         }
-        if ntdll_entry.is_null() {
+        let mods = &mods[..n];
+        if find_module(mods, "ntdll.dll").is_none() {
             die(ST_NO_NTDLL);
         }
-
-        let exe_base = core::ptr::read(exe_entry.add(ENT_DLL_BASE) as *const usize);
-        let exe_size = core::ptr::read(exe_entry.add(ENT_SIZE_OF_IMAGE) as *const u32) as usize;
-        let nt_base = core::ptr::read(ntdll_entry.add(ENT_DLL_BASE) as *const usize);
-        let nt_size = core::ptr::read(ntdll_entry.add(ENT_SIZE_OF_IMAGE) as *const u32) as usize;
-        if exe_base == 0 || exe_size == 0 || nt_base == 0 || nt_size == 0 {
+        let exe = mods[0];
+        if exe.base == 0 || exe.size == 0 {
             die(ST_BAD_PE);
         }
 
-        // Parse both as LOADED images (sections at their RVAs).
-        let exe_img = core::slice::from_raw_parts(exe_base as *const u8, exe_size);
-        let nt_img = core::slice::from_raw_parts(nt_base as *const u8, nt_size);
-        let Ok(exe) = PeFile::parse_loaded(exe_img) else {
-            die(ST_BAD_PE)
-        };
-        let Ok(nt) = PeFile::parse_loaded(nt_img) else {
-            die(ST_BAD_PE)
-        };
-        let Ok(imports) = exe.imports() else {
-            die(ST_BAD_PE)
-        };
-
-        for dll in imports {
-            if !dll.name.eq_ignore_ascii_case("ntdll.dll") {
-                continue;
-            }
-            for entry in dll.thunks {
-                let Some(rva) = nt.resolve_export(&entry) else {
-                    die(ST_UNRESOLVED)
+        // Bind the imports of EVERY module, dependencies first: reverse load order
+        // (ntdll, kernel32, exe). The address written into an IAT is the exporter's
+        // final export address, so it does not depend on the exporter's own imports
+        // being bound yet; the order only makes failures surface dependency-first.
+        let mut i = n;
+        while i > 0 {
+            i -= 1;
+            let imp = mods[i];
+            let Some(importer) = imp.pe() else {
+                die(ST_BAD_PE)
+            };
+            let Ok(imports) = importer.imports() else {
+                die(ST_BAD_PE)
+            };
+            for dll in imports {
+                let Some(ex) = find_module(mods, dll.name) else {
+                    die(ST_NO_DEP)
                 };
-                if rva as usize >= nt_size {
-                    die(ST_UNRESOLVED);
+                for entry in dll.thunks {
+                    let addr = match resolve_import(mods, ex, &entry) {
+                        Ok(a) => a,
+                        Err(st) => die(st),
+                    };
+                    // Confine the write to THIS importer's own image.
+                    if !iat_slot_ok(&importer, imp.size as u64, entry.iat_rva) {
+                        die(ST_BAD_IAT);
+                    }
+                    let slot = (imp.base + entry.iat_rva as usize) as *mut u64;
+                    core::ptr::write_volatile(slot, addr as u64);
                 }
-                if !iat_slot_ok(&exe, exe_size as u64, entry.iat_rva) {
-                    die(ST_BAD_IAT);
-                }
-                let slot = (exe_base + entry.iat_rva as usize) as *mut u64;
-                core::ptr::write_volatile(slot, (nt_base + rva as usize) as u64);
             }
         }
 
-        let ep = exe.entry_point_rva() as usize;
-        if ep == 0 || ep >= exe_size {
+        let Some(exe_pe) = exe.pe() else {
+            die(ST_BAD_PE)
+        };
+        let ep = exe_pe.entry_point_rva() as usize;
+        if ep == 0 || ep >= exe.size {
             die(ST_BAD_ENTRY);
         }
-        let entry: extern "system" fn() -> ! = core::mem::transmute(exe_base + ep);
+        let entry: extern "system" fn() -> ! = core::mem::transmute(exe.base + ep);
         entry()
     }
 }

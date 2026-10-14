@@ -77,6 +77,20 @@ const TESTS: &[(&str, TestFn)] = &[
         usermode_loader_rejects_bad_iat,
     ),
     ("peb_ldr_list_well_formed", peb_ldr_list_well_formed),
+    ("exe_uses_kernel32_and_runs", exe_uses_kernel32_and_runs),
+    ("peb_ldr_three_modules", peb_ldr_three_modules),
+    (
+        "exe_calls_forwarded_kernel32_export",
+        exe_calls_forwarded_kernel32_export,
+    ),
+    (
+        "loader_rejects_missing_dependency",
+        loader_rejects_missing_dependency,
+    ),
+    (
+        "usermode_loader_rejects_bad_iat_dir12",
+        usermode_loader_rejects_bad_iat_dir12,
+    ),
     ("two_user_processes_preempt", two_user_processes_preempt),
     ("reloc_dir64_crosses_page", reloc_dir64_crosses_page),
     ("stack_placed_above_image", stack_placed_above_image),
@@ -998,6 +1012,156 @@ fn usermode_loader_rejects_bad_iat() -> Result<(), &'static str> {
         }
     }
     Err("IAT ruim: processo nao foi recusado/recolhido")
+}
+
+/// Both DLLs embedded (the multi-module tests are skipped otherwise).
+fn have_both_dlls() -> bool {
+    !crate::ntdll_image::NTDLL_BYTES.is_empty() && !crate::kernel32_image::KERNEL32_BYTES.is_empty()
+}
+
+/// Sentinels of the user-mode loader (must match crates/ntdll).
+const LDR_ST_NO_DEP: u64 = 0xC000_7009;
+
+fn exe_uses_kernel32_and_runs() -> Result<(), &'static str> {
+    use core::sync::atomic::Ordering;
+    if !have_both_dlls() {
+        return Ok(()); // ntdll/kernel32 not embedded on this host: skip.
+    }
+    crate::syscall::LAST_WRITE_LEN.store(0, Ordering::SeqCst);
+    let before = crate::mem::frames::free_frame_count();
+    // exe -> kernel32!{GetStdHandle,WriteFile,ExitProcess} -> ntdll!{NtWriteFile,NtTerminateProcess}
+    crate::process::spawn_exe_image_with_k32(crate::process::build_exe_importing_kernel32());
+    for _ in 0..12000 {
+        crate::sched::yield_now();
+        if crate::syscall::LAST_WRITE_LEN.load(Ordering::SeqCst) == 6
+            && crate::syscall::last_write_is(
+                b"TukOS
+",
+            )
+            && crate::mem::frames::free_frame_count() == before
+        {
+            return Ok(());
+        }
+    }
+    Err("o .exe que usa kernel32->ntdll nao imprimiu/saiu")
+}
+
+fn peb_ldr_three_modules() -> Result<(), &'static str> {
+    if !have_both_dlls() {
+        return Ok(());
+    }
+    let es =
+        crate::process::build_exe_k32_space_with(crate::process::build_exe_importing_kernel32());
+    let rd = |va: u64| -> Option<u64> {
+        let mut b = [0u8; 8];
+        for (i, o) in b.iter_mut().enumerate() {
+            let a = va + i as u64;
+            let phys = es.space.translate(a & !4095)?;
+            *o = unsafe { *((crate::mem::frames::phys_to_virt(phys) + (a & 4095)) as *const u8) };
+        }
+        Some(u64::from_le_bytes(b))
+    };
+    let ldr = rd(es.peb_va + 0x18).ok_or("PEB ilegivel")?;
+    let head = ldr + 0x10;
+    // Load order: exe, kernel32, ntdll, then back to the head; DllBase at +0x30.
+    let want = [
+        crate::process::EXE_BASE,
+        crate::process::KERNEL32_BASE,
+        crate::process::NTDLL_BASE,
+    ];
+    let mut cur = rd(head).ok_or("head ilegivel")?;
+    for w in want {
+        if cur == head || rd(cur + 0x30) != Some(w) {
+            return Err("ordem/base dos modulos errada em PEB->Ldr");
+        }
+        cur = rd(cur).ok_or("flink ilegivel")?;
+    }
+    if cur != head {
+        return Err("lista deveria ter exatamente tres modulos");
+    }
+    Ok(())
+}
+
+fn exe_calls_forwarded_kernel32_export() -> Result<(), &'static str> {
+    use core::sync::atomic::Ordering;
+    if !have_both_dlls() {
+        return Ok(());
+    }
+    // kernel32 exports RtlExitUserProcess as a FORWARDER to ntdll.NtTerminateProcess;
+    // the exe's IAT must end up pointing at ntdll's stub, so the status reaches the kernel.
+    crate::syscall::LAST_TERMINATE_STATUS.store(u64::MAX, Ordering::SeqCst);
+    let before = crate::mem::frames::free_frame_count();
+    crate::process::spawn_exe_image_with_k32(crate::process::build_exe_calling_forwarder());
+    for _ in 0..12000 {
+        crate::sched::yield_now();
+        let st = crate::syscall::LAST_TERMINATE_STATUS.load(Ordering::SeqCst);
+        if st != u64::MAX {
+            if st != 0x5A5A {
+                return Err("forwarder nao levou ao NtTerminateProcess do ntdll");
+            }
+            if crate::mem::frames::free_frame_count() == before {
+                return Ok(());
+            }
+        }
+    }
+    Err("exe que chama o forwarder nao terminou/recolheu")
+}
+
+fn loader_rejects_missing_dependency() -> Result<(), &'static str> {
+    use core::sync::atomic::Ordering;
+    if !have_both_dlls() {
+        return Ok(());
+    }
+    crate::syscall::LAST_WRITE_LEN.store(0, Ordering::SeqCst);
+    crate::syscall::LAST_TERMINATE_STATUS.store(u64::MAX, Ordering::SeqCst);
+    let before = crate::mem::frames::free_frame_count();
+    // The exe imports user32.dll, which is not in PEB->Ldr.
+    crate::process::spawn_exe_image_with_k32(crate::process::build_exe_importing_missing_dll());
+    for _ in 0..12000 {
+        crate::sched::yield_now();
+        let st = crate::syscall::LAST_TERMINATE_STATUS.load(Ordering::SeqCst);
+        if st != u64::MAX {
+            if st != LDR_ST_NO_DEP {
+                return Err("dependencia ausente: status do loader inesperado");
+            }
+            if crate::syscall::LAST_WRITE_LEN.load(Ordering::SeqCst) != 0 {
+                return Err("exe com dependencia ausente executou");
+            }
+            if crate::mem::frames::free_frame_count() == before {
+                return Ok(());
+            }
+        }
+    }
+    Err("dependencia ausente: processo nao foi recusado/recolhido")
+}
+
+fn usermode_loader_rejects_bad_iat_dir12() -> Result<(), &'static str> {
+    use core::sync::atomic::Ordering;
+    if !have_both_dlls() {
+        return Ok(());
+    }
+    crate::syscall::LAST_WRITE_LEN.store(0, Ordering::SeqCst);
+    crate::syscall::LAST_TERMINATE_STATUS.store(u64::MAX, Ordering::SeqCst);
+    let before = crate::mem::frames::free_frame_count();
+    // IAT slot inside the R+X .text, AND data directory #12 hostilely covers .text:
+    // the rejection must come from the loader's !exec gate, not from dir 12.
+    crate::process::spawn_exe_image_with_k32(crate::process::build_exe_with_bad_iat_dir12());
+    for _ in 0..12000 {
+        crate::sched::yield_now();
+        let st = crate::syscall::LAST_TERMINATE_STATUS.load(Ordering::SeqCst);
+        if st != u64::MAX {
+            if st != LDR_ST_BAD_IAT {
+                return Err("dir12 hostil: status do loader inesperado");
+            }
+            if crate::syscall::LAST_WRITE_LEN.load(Ordering::SeqCst) != 0 {
+                return Err("exe com dir12 hostil executou");
+            }
+            if crate::mem::frames::free_frame_count() == before {
+                return Ok(());
+            }
+        }
+    }
+    Err("dir12 hostil: processo nao foi recusado/recolhido")
 }
 
 fn peb_ldr_list_well_formed() -> Result<(), &'static str> {

@@ -585,14 +585,55 @@ pub fn build_exe_ntdll_space() -> ExeSpace {
 
 /// Same as `build_exe_ntdll_space` for an arbitrary test `.exe`.
 pub fn build_exe_ntdll_space_with(exe: alloc::vec::Vec<u8>) -> ExeSpace {
+    build_space(exe, false)
+}
+
+const KERNEL32_LOAD_BASE: u64 = 0x0800_0000;
+pub const KERNEL32_BASE: u64 = KERNEL32_LOAD_BASE;
+
+/// Like `build_exe_ntdll_space_with` but maps three modules (exe 0x40_0000,
+/// kernel32 0x0800_0000, ntdll 0x1000_0000) and lists them in load order
+/// exe, kernel32, ntdll. Requires both DLLs to be embedded.
+pub fn build_exe_k32_space_with(exe: alloc::vec::Vec<u8>) -> ExeSpace {
+    build_space(exe, true)
+}
+
+fn build_space(exe: alloc::vec::Vec<u8>, with_k32: bool) -> ExeSpace {
     let nt = crate::ntdll_image::NTDLL_BYTES;
+    let k32 = crate::kernel32_image::KERNEL32_BYTES;
     let space = AddressSpace::new_user();
     let exe_entry = crate::loader::load_pe(&space, &exe, PE_IMAGE_BASE).expect("load exe");
-    let ntdll_entry = crate::loader::load_pe(&space, nt, NTDLL_LOAD_BASE).expect("load ntdll");
     let exe_top = crate::loader::image_top(&exe, PE_IMAGE_BASE).expect("image_top");
+    let mut mods = alloc::vec::Vec::new();
+    mods.push(crate::teb::LdrModule {
+        base: PE_IMAGE_BASE,
+        entry: exe_entry,
+        size: (exe_top - PE_IMAGE_BASE) as u32,
+        name: "program.exe",
+    });
+    let mut prev_top = exe_top;
+    if with_k32 {
+        let entry = crate::loader::load_pe(&space, k32, KERNEL32_LOAD_BASE).expect("load kernel32");
+        let top = crate::loader::image_top(k32, KERNEL32_LOAD_BASE).expect("image_top");
+        // Images must not overlap: exe < kernel32 < ntdll.
+        assert!(prev_top <= KERNEL32_LOAD_BASE, "exe invade o kernel32");
+        mods.push(crate::teb::LdrModule {
+            base: KERNEL32_LOAD_BASE,
+            entry,
+            size: (top - KERNEL32_LOAD_BASE) as u32,
+            name: "kernel32.dll",
+        });
+        prev_top = top;
+    }
+    let ntdll_entry = crate::loader::load_pe(&space, nt, NTDLL_LOAD_BASE).expect("load ntdll");
     let nt_top = crate::loader::image_top(nt, NTDLL_LOAD_BASE).expect("image_top");
-    let exe_size = (exe_top - PE_IMAGE_BASE) as u32;
-    let nt_size = (nt_top - NTDLL_LOAD_BASE) as u32;
+    assert!(prev_top <= NTDLL_LOAD_BASE, "modulo invade o ntdll");
+    mods.push(crate::teb::LdrModule {
+        base: NTDLL_LOAD_BASE,
+        entry: ntdll_entry,
+        size: (nt_top - NTDLL_LOAD_BASE) as u32,
+        name: "ntdll.dll",
+    });
     let stack_va = nt_top + 4096;
     let stack_phys = crate::mem::frames::alloc_frame().expect("sem frame p/ pilha");
     unsafe {
@@ -619,26 +660,7 @@ pub fn build_exe_ntdll_space_with(exe: alloc::vec::Vec<u8>) -> ExeSpace {
         stack_va,
     )
     .expect("teb setup");
-    crate::teb::setup_ldr(
-        &space,
-        ldr_va,
-        peb_va,
-        &[
-            crate::teb::LdrModule {
-                base: PE_IMAGE_BASE,
-                entry: exe_entry,
-                size: exe_size,
-                name: "program.exe",
-            },
-            crate::teb::LdrModule {
-                base: NTDLL_LOAD_BASE,
-                entry: ntdll_entry,
-                size: nt_size,
-                name: "ntdll.dll",
-            },
-        ],
-    )
-    .expect("ldr setup");
+    crate::teb::setup_ldr(&space, ldr_va, peb_va, &mods).expect("ldr setup");
     crate::teb::setup_process_parameters(&space, params_va, peb_va, crate::object::CONSOLE_HANDLE)
         .expect("process parameters setup");
     ExeSpace {
@@ -688,4 +710,189 @@ pub fn spawn_exe_image_with_ntdll(exe: alloc::vec::Vec<u8>) {
     };
     let kstack = alloc::vec![0u8; KSTACK_SIZE].into_boxed_slice();
     crate::sched::spawn_user(es.space, start, es.stack_va + 4096, kstack, es.teb_va);
+}
+
+/// Starts `exe` loaded with the embedded kernel32 AND ntdll (three modules) on a new
+/// user thread that begins at ntdll's `LdrInitializeThunk`. Does nothing when either
+/// DLL is not embedded.
+pub fn spawn_exe_image_with_k32(exe: alloc::vec::Vec<u8>) {
+    let nt = crate::ntdll_image::NTDLL_BYTES;
+    if nt.is_empty() || crate::kernel32_image::KERNEL32_BYTES.is_empty() {
+        return;
+    }
+    let es = build_exe_k32_space_with(exe);
+    let rva = pe::PeFile::parse(nt)
+        .ok()
+        .and_then(|p| p.export_rva_by_name("LdrInitializeThunk"))
+        .expect("ntdll sem LdrInitializeThunk");
+    let kstack = alloc::vec![0u8; KSTACK_SIZE].into_boxed_slice();
+    crate::sched::spawn_user(
+        es.space,
+        NTDLL_LOAD_BASE + u64::from(rva),
+        es.stack_va + 4096,
+        kstack,
+        es.teb_va,
+    );
+}
+
+const TEXT_RVA: u32 = 0x1000;
+const DATA_RVA: u32 = 0x2000;
+const DATA_RAW_OFF: usize = 0x400;
+/// Offset of the "TukOS\n" message in the `.data` of `build_import_exe`.
+const IMPORT_EXE_MSG_OFF: u32 = 0xC0;
+
+/// Appends `opcode` + a rip-relative disp32 aimed at `target_rva` (the exe's `.text`
+/// sits at `TEXT_RVA`).
+fn rip_rel_to(code: &mut alloc::vec::Vec<u8>, opcode: &[u8], target_rva: u32) {
+    code.extend_from_slice(opcode);
+    let next = TEXT_RVA + code.len() as u32 + 4;
+    code.extend_from_slice(&(target_rva.wrapping_sub(next) as i32).to_le_bytes());
+}
+
+/// Builds a two-section test `.exe` (`.text` R+X at 0x1000, `.data` R+W at 0x2000)
+/// importing `funcs` (at most 3, by name) from `dll`. `.data` holds: descriptor 0x00,
+/// INT 0x40, IAT 0x60 (slot i at 0x60+8i), DLL name 0x80, hint/name entries from
+/// 0x90, message 0xC0. `first_thunk` overrides the descriptor's FirstThunk RVA and
+/// `dir12` sets data directory #12 (both used to craft hostile exes). `code` gets the
+/// IAT slot RVAs and the message RVA and returns the `.text` bytes (padded to 32).
+fn build_import_exe(
+    dll: &str,
+    funcs: &[&str],
+    first_thunk: Option<u32>,
+    dir12: Option<(u32, u32)>,
+    code: impl FnOnce(&[u32], u32) -> alloc::vec::Vec<u8>,
+) -> alloc::vec::Vec<u8> {
+    const OPT_SIZE: usize = 112 + 16 * 8;
+    assert!(funcs.len() <= 3 && dll.len() < 15);
+    let slots: alloc::vec::Vec<u32> = (0..funcs.len() as u32)
+        .map(|i| DATA_RVA + 0x60 + 8 * i)
+        .collect();
+    let mut c = code(&slots, DATA_RVA + IMPORT_EXE_MSG_OFF);
+    while c.len() < 32 {
+        c.push(0xCC);
+    }
+
+    let mut d = alloc::vec![0u8; 0xE0];
+    put(&mut d, 0, &(DATA_RVA + 0x40).to_le_bytes()); // OriginalFirstThunk
+    put(&mut d, 12, &(DATA_RVA + 0x80).to_le_bytes()); // Name
+    let ft = first_thunk.unwrap_or(DATA_RVA + 0x60);
+    put(&mut d, 16, &ft.to_le_bytes()); // FirstThunk
+    put(&mut d, 0x80, dll.as_bytes()); // NUL already there (zeroed)
+    let mut hn = 0x90usize;
+    for (i, f) in funcs.iter().enumerate() {
+        assert!(hn + 2 + f.len() < IMPORT_EXE_MSG_OFF as usize);
+        let rva = u64::from(DATA_RVA) + hn as u64;
+        put(&mut d, 0x40 + 8 * i, &rva.to_le_bytes()); // INT
+        put(&mut d, 0x60 + 8 * i, &rva.to_le_bytes()); // IAT (pre-bind = INT)
+        put(&mut d, hn + 2, f.as_bytes()); // hint(2)=0, name, NUL
+        hn += (2 + f.len() + 1 + 1) & !1;
+    }
+    put(&mut d, IMPORT_EXE_MSG_OFF as usize, b"TukOS\n");
+
+    let text_raw = PE_RAW_OFF;
+    let mut v = alloc::vec![0u8; DATA_RAW_OFF + d.len()];
+    put(&mut v, 0, &0x5A4Du16.to_le_bytes());
+    put(&mut v, 0x3C, &0x40u32.to_le_bytes());
+    put(&mut v, 0x40, &0x0000_4550u32.to_le_bytes());
+    let coff = 0x44;
+    put(&mut v, coff, &0x8664u16.to_le_bytes());
+    put(&mut v, coff + 2, &2u16.to_le_bytes());
+    put(&mut v, coff + 16, &(OPT_SIZE as u16).to_le_bytes());
+    let opt = coff + 20;
+    put(&mut v, opt, &0x20Bu16.to_le_bytes());
+    put(&mut v, opt + 16, &TEXT_RVA.to_le_bytes());
+    put(&mut v, opt + 24, &PE_IMAGE_BASE.to_le_bytes());
+    put(&mut v, opt + 56, &0x3000u32.to_le_bytes());
+    put(&mut v, opt + 60, &(PE_RAW_OFF as u32).to_le_bytes());
+    put(&mut v, opt + 108, &16u32.to_le_bytes());
+    put(&mut v, opt + 112 + 8, &DATA_RVA.to_le_bytes()); // import dir
+    put(&mut v, opt + 112 + 12, &0x28u32.to_le_bytes());
+    if let Some((rva, size)) = dir12 {
+        put(&mut v, opt + 112 + 12 * 8, &rva.to_le_bytes());
+        put(&mut v, opt + 112 + 12 * 8 + 4, &size.to_le_bytes());
+    }
+    let s = opt + OPT_SIZE;
+    put(&mut v, s, b".text\0\0\0");
+    put(&mut v, s + 8, &(c.len() as u32).to_le_bytes());
+    put(&mut v, s + 12, &TEXT_RVA.to_le_bytes());
+    put(&mut v, s + 16, &(c.len() as u32).to_le_bytes());
+    put(&mut v, s + 20, &(text_raw as u32).to_le_bytes());
+    put(&mut v, s + 36, &SCN_CODE_EXEC_READ.to_le_bytes());
+    let s2 = s + 40;
+    put(&mut v, s2, b".data\0\0\0");
+    put(&mut v, s2 + 8, &(d.len() as u32).to_le_bytes());
+    put(&mut v, s2 + 12, &DATA_RVA.to_le_bytes());
+    put(&mut v, s2 + 16, &(d.len() as u32).to_le_bytes());
+    put(&mut v, s2 + 20, &(DATA_RAW_OFF as u32).to_le_bytes());
+    put(&mut v, s2 + 36, &SCN_DATA_RW.to_le_bytes());
+    put(&mut v, text_raw, &c);
+    put(&mut v, DATA_RAW_OFF, &d);
+    v
+}
+
+/// Test `.exe` importing `kernel32.dll!{GetStdHandle, WriteFile, ExitProcess}`:
+/// `WriteFile(GetStdHandle(-11), "TukOS\n", 6, &n, 0)` then `ExitProcess(0)`.
+pub fn build_exe_importing_kernel32() -> alloc::vec::Vec<u8> {
+    build_import_exe(
+        "kernel32.dll",
+        &["GetStdHandle", "WriteFile", "ExitProcess"],
+        None,
+        None,
+        |slot, msg| {
+            let mut c = alloc::vec::Vec::new();
+            c.extend_from_slice(&[0x48, 0x83, 0xEC, 0x38]); // sub rsp, 0x38
+            c.extend_from_slice(&[0xB9, 0xF5, 0xFF, 0xFF, 0xFF]); // mov ecx, -11
+            rip_rel_to(&mut c, &[0xFF, 0x15], slot[0]); // call [GetStdHandle]
+            c.extend_from_slice(&[0x48, 0x89, 0xC1]); // mov rcx, rax
+            rip_rel_to(&mut c, &[0x48, 0x8D, 0x15], msg); // lea rdx, [msg]
+            c.extend_from_slice(&[0x41, 0xB8, 6, 0, 0, 0]); // mov r8d, 6
+            c.extend_from_slice(&[0x4C, 0x8D, 0x4C, 0x24, 0x30]); // lea r9, [rsp+0x30] (&n)
+            c.extend_from_slice(&[0x48, 0xC7, 0x44, 0x24, 0x20, 0, 0, 0, 0]); // [rsp+0x20]=0
+            rip_rel_to(&mut c, &[0xFF, 0x15], slot[1]); // call [WriteFile]
+            c.extend_from_slice(&[0x31, 0xC9]); // xor ecx, ecx
+            rip_rel_to(&mut c, &[0xFF, 0x15], slot[2]); // call [ExitProcess]
+            c.extend_from_slice(&[0x0F, 0x0B]); // ud2
+            c
+        },
+    )
+}
+
+/// Test `.exe` that calls `kernel32!RtlExitUserProcess(0x5A5A)`, which kernel32
+/// exports as a forwarder to `ntdll.NtTerminateProcess` (so the status 0x5A5A reaches
+/// the kernel only if the loader chased the forward).
+pub fn build_exe_calling_forwarder() -> alloc::vec::Vec<u8> {
+    build_import_exe(
+        "kernel32.dll",
+        &["RtlExitUserProcess"],
+        None,
+        None,
+        |slot, _| {
+            let mut c = alloc::vec::Vec::new();
+            c.extend_from_slice(&[0x48, 0x83, 0xEC, 0x28]); // sub rsp, 0x28
+            c.extend_from_slice(&[0xB9, 0x5A, 0x5A, 0, 0]); // mov ecx, 0x5A5A
+            rip_rel_to(&mut c, &[0xFF, 0x15], slot[0]); // call [RtlExitUserProcess]
+            c.extend_from_slice(&[0x0F, 0x0B]);
+            c
+        },
+    )
+}
+
+/// Test `.exe` importing a DLL (`user32.dll`) that is not loaded in the process.
+pub fn build_exe_importing_missing_dll() -> alloc::vec::Vec<u8> {
+    build_import_exe("user32.dll", &["MessageBoxA"], None, None, |_, _| {
+        alloc::vec![0x0F, 0x0B]
+    })
+}
+
+/// Hostile `.exe`: its IAT (FirstThunk) lies inside the R+X `.text` AND its data
+/// directory #12 claims `.text` is the IAT. The user-mode loader must still refuse it
+/// (non-writable/executable section), proving the rejection does not rest on dir 12.
+pub fn build_exe_with_bad_iat_dir12() -> alloc::vec::Vec<u8> {
+    build_import_exe(
+        "ntdll.dll",
+        &["NtTerminateProcess"],
+        Some(TEXT_RVA),
+        Some((TEXT_RVA, 0x20)),
+        |_, _| alloc::vec![0x0F, 0x0B],
+    )
 }

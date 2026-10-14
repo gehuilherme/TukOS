@@ -29,7 +29,8 @@ impl Default for FxArea {
     }
 }
 
-/// Enables SSE for Ring 3 code: CR0.EM = 0, CR0.MP = 1, CR4.OSFXSR = 1,
+/// Enables SSE for Ring 3 code: CR0.EM = 0, CR0.TS = 0 (no stale #NM on the first
+/// fxsave), CR0.MP = 1, CR4.OSFXSR = 1,
 /// CR4.OSXMMEXCPT = 1. The kernel itself is soft-float and never touches XMM;
 /// the scheduler saves/restores the state per thread with `fxsave`/`fxrstor`.
 ///
@@ -39,7 +40,7 @@ pub unsafe fn enable_sse() {
     unsafe {
         asm!(
             "mov rax, cr0",
-            "and rax, -5",
+            "and rax, -13", // clear CR0.EM (bit 2) and CR0.TS (bit 3): no stale #NM on fxsave
             "or rax, 2",
             "mov cr0, rax",
             "mov rax, cr4",
