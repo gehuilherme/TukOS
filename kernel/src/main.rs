@@ -8,6 +8,7 @@ mod ktest;
 mod panic;
 mod qemu;
 mod serial;
+mod trap;
 
 use limine::BaseRevision;
 use limine::request::{RequestsEndMarker, RequestsStartMarker};
@@ -30,6 +31,11 @@ unsafe extern "C" fn kmain() -> ! {
     kprintln!("TukOS {} iniciando", env!("CARGO_PKG_VERSION"));
     assert!(BASE_REVISION.is_supported(), "revisao base do Limine nao suportada");
 
+    unsafe {
+        arch_x86_64::gdt::init();
+        arch_x86_64::idt::init();
+    }
+    arch_x86_64::trap::set_handler(trap::handle);
     kprintln!("TukOS pronto");
 
     #[cfg(feature = "ktest")]
@@ -37,6 +43,11 @@ unsafe extern "C" fn kmain() -> ! {
 
     #[cfg(feature = "ktest-panic")]
     panic!("ktest-panic deliberado");
+
+    #[cfg(feature = "ktest-fault")]
+    unsafe {
+        core::ptr::read_volatile(0x0000_7fff_0000_0000 as *const u64);
+    }
 
     #[allow(unreachable_code)]
     loop {

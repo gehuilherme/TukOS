@@ -65,6 +65,66 @@ pub const fn tss_descriptor(base: u64, limit: u32) -> [u64; 2] {
     [lo, hi]
 }
 
+#[cfg(target_os = "none")]
+mod hw {
+    use super::*;
+    use crate::cpu::{self, DescriptorTablePointer};
+    use core::arch::asm;
+    use core::mem::size_of;
+
+    const DF_STACK_SIZE: usize = 16 * 1024;
+
+    #[repr(C, align(16))]
+    struct Stack([u8; DF_STACK_SIZE]);
+
+    static mut DF_STACK: Stack = Stack([0; DF_STACK_SIZE]);
+    static mut TSS: Tss = Tss::new();
+    static mut GDT: [u64; 7] = [0; 7];
+
+    /// Loads the kernel GDT and TSS and reloads every segment register.
+    ///
+    /// # Safety
+    /// Must run once, on the boot CPU, before interrupts are enabled.
+    pub unsafe fn init() {
+        unsafe {
+            let df_top = (&raw const DF_STACK) as u64 + DF_STACK_SIZE as u64;
+            let tss = &raw mut TSS;
+            tss.write(Tss::with_ist1(df_top));
+
+            let [tss_lo, tss_hi] = tss_descriptor(tss as u64, (size_of::<Tss>() - 1) as u32);
+            let gdt = &raw mut GDT;
+            gdt.write([0, KERNEL_CODE, KERNEL_DATA, USER_DATA, USER_CODE, tss_lo, tss_hi]);
+
+            let ptr = DescriptorTablePointer { limit: (size_of::<[u64; 7]>() - 1) as u16, base: gdt as u64 };
+            cpu::lgdt(&ptr);
+
+            // Far return to reload CS.
+            asm!(
+                "push {sel}",
+                "lea {tmp}, [rip + 2f]",
+                "push {tmp}",
+                "retfq",
+                "2:",
+                sel = in(reg) KERNEL_CS as u64,
+                tmp = lateout(reg) _,
+            );
+            asm!(
+                "mov ds, {0:x}",
+                "mov es, {0:x}",
+                "mov ss, {0:x}",
+                "mov fs, {0:x}",
+                "mov gs, {0:x}",
+                in(reg) KERNEL_DS,
+                options(nostack, preserves_flags),
+            );
+            asm!("ltr {0:x}", in(reg) TSS_SEL, options(nostack, preserves_flags));
+        }
+    }
+}
+
+#[cfg(target_os = "none")]
+pub use hw::init;
+
 #[cfg(test)]
 mod tests {
     use super::*;

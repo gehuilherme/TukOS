@@ -91,6 +91,7 @@ const TIMEOUT: Duration = Duration::from_secs(60);
 pub fn run_all() -> crate::Result<()> {
     run_variant("ktest", check_ktest)?;
     run_variant("ktest-panic", |o, r| check_expected_panic(o, r, &["ktest-panic deliberado"]))?;
+    run_variant("ktest-fault", |o, r| check_expected_panic(o, r, &["PAGE_FAULT", "cr2=0x7fff00000000"]))?;
     println!("ktest: todas as variantes passaram");
     Ok(())
 }

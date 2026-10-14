@@ -2,7 +2,48 @@
 
 type TestFn = fn() -> Result<(), &'static str>;
 
-const TESTS: &[(&str, TestFn)] = &[("limine_base_revision_supported", limine_base_revision_supported)];
+const TESTS: &[(&str, TestFn)] = &[
+    ("limine_base_revision_supported", limine_base_revision_supported),
+    ("gdt_selectors_loaded", gdt_selectors_loaded),
+    ("tss_loaded", tss_loaded),
+    ("idt_loaded", idt_loaded),
+    ("breakpoint_returns", breakpoint_returns),
+];
+
+fn gdt_selectors_loaded() -> Result<(), &'static str> {
+    use arch_x86_64::{cpu, gdt};
+    if cpu::read_cs() != gdt::KERNEL_CS {
+        return Err("CS diferente de KERNEL_CS");
+    }
+    if cpu::read_ss() != gdt::KERNEL_DS {
+        return Err("SS diferente de KERNEL_DS");
+    }
+    Ok(())
+}
+
+fn tss_loaded() -> Result<(), &'static str> {
+    if arch_x86_64::cpu::str() == arch_x86_64::gdt::TSS_SEL { Ok(()) } else { Err("TR diferente de TSS_SEL") }
+}
+
+fn idt_loaded() -> Result<(), &'static str> {
+    let p = arch_x86_64::cpu::sidt();
+    let (limit, base) = (p.limit, p.base);
+    if limit != 256 * 16 - 1 {
+        return Err("limite da IDT incorreto");
+    }
+    if base != arch_x86_64::idt::table_address() {
+        return Err("base da IDT nao aponta para a tabela do kernel");
+    }
+    Ok(())
+}
+
+fn breakpoint_returns() -> Result<(), &'static str> {
+    use core::sync::atomic::Ordering;
+    let before = crate::trap::BREAKPOINTS.load(Ordering::SeqCst);
+    arch_x86_64::cpu::int3();
+    let after = crate::trap::BREAKPOINTS.load(Ordering::SeqCst);
+    if after == before + 1 { Ok(()) } else { Err("handler de breakpoint nao contou a excecao") }
+}
 
 fn limine_base_revision_supported() -> Result<(), &'static str> {
     if crate::BASE_REVISION.is_supported() { Ok(()) } else { Err("revisao base nao suportada") }
