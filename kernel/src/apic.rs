@@ -45,5 +45,6 @@ pub fn init() {
 pub fn on_timer() {
     TICKS.fetch_add(1, Ordering::SeqCst);
     eoi();
+    crate::kbd::poll();
     crate::sched::on_tick();
 }

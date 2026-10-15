@@ -22,6 +22,7 @@ const TESTS: &[(&str, TestFn)] = &[
     ("heap_box_and_vec", heap_box_and_vec),
     ("ist_stacks_installed", ist_stacks_installed),
     ("timer_ticks_advance", timer_ticks_advance),
+    ("keyboard_poll_decodes", keyboard_poll_decodes),
     ("spawned_thread_runs", spawned_thread_runs),
     ("yield_alternates_threads", yield_alternates_threads),
     ("preemption_runs_both_threads", preemption_runs_both_threads),
@@ -833,6 +834,29 @@ fn timer_ticks_advance() -> Result<(), &'static str> {
         arch_x86_64::cpu::hlt();
     }
     Err("timer nao avancou 5 ticks")
+}
+
+fn keyboard_poll_decodes() -> Result<(), &'static str> {
+    // Esvazia a fila (o poll real pode ter capturado ruido).
+    while crate::kbd::try_pop_input().is_some() {}
+    // shift-make, 'a', shift-break, 'a', Enter, key-release (ignorado)
+    for sc in [0x2Au8, 0x1E, 0xAA, 0x1E, 0x1C, 0x9E] {
+        crate::kbd::push_scancode_byte(sc);
+    }
+    let want = *b"Aa\n";
+    for w in want {
+        if crate::kbd::try_pop_input() != Some(w) {
+            return Err("caractere decodificado inesperado");
+        }
+    }
+    if crate::kbd::try_pop_input().is_some() {
+        return Err("fila deveria estar vazia");
+    }
+    crate::kbd::test_push_input(b"hi");
+    if crate::kbd::try_pop_input() != Some(b'h') || crate::kbd::try_pop_input() != Some(b'i') {
+        return Err("test_push_input falhou");
+    }
+    Ok(())
 }
 
 static RAN: AtomicU64 = AtomicU64::new(0);

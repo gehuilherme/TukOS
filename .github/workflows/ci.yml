@@ -23,7 +23,7 @@ jobs:
       - name: Testes do host
         run: cargo xtask test
       - name: Lint
-        run: cargo clippy -p xtask -p arch-x86_64 -p mm -p pe -- -D warnings
+        run: cargo clippy -p xtask -p arch-x86_64 -p mm -p pe -p kbd -- -D warnings
       - name: Lint do kernel
         run: cargo clippy -p tukos-kernel --target x86_64-unknown-none --features ktest -- -D warnings
       - name: Autotestes do kernel no QEMU

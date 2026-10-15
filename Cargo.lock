@@ -199,6 +199,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "kbd"
+version = "0.1.0"
+
+[[package]]
 name = "kernel32"
 version = "0.1.0"
 
@@ -364,6 +368,7 @@ name = "tukos-kernel"
 version = "0.1.0"
 dependencies = [
  "arch-x86_64",
+ "kbd",
  "limine",
  "mm",
  "noto-sans-mono-bitmap",
