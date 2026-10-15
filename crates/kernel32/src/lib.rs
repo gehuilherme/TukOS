@@ -663,20 +663,8 @@ pub extern "system" fn GetCurrentProcess() -> isize {
 // --- modules / command line / environment -----------------------------------------
 
 const EXE_PATH: &[u8; 13] = b"C:\\hello.exe\0";
-static CMDLINE_A: [u8; 10] = *b"hello.exe\0";
-static CMDLINE_W: [u16; 10] = widen(b"hello.exe\0");
 /// Empty environment block: a double NUL terminator.
 static EMPTY_ENV_W: [u16; 2] = [0, 0];
-
-const fn widen<const N: usize>(s: &[u8; N]) -> [u16; N] {
-    let mut a = [0u16; N];
-    let mut i = 0;
-    while i < N {
-        a[i] = s[i] as u16;
-        i += 1;
-    }
-    a
-}
 
 fn exe_base() -> usize {
     let peb = teb_peb();
@@ -782,15 +770,66 @@ pub unsafe extern "system" fn GetModuleFileNameA(_module: usize, buf: *mut u8, s
     }
     n as u32
 }
-/// `GetCommandLineA` [stub]: static `hello.exe` (no command line is passed yet).
+/// UTF-16 units of an empty string, for `GetCommandLine*` when the PEB is unavailable.
+static EMPTY_W: [u16; 1] = [0];
+/// Longest command line (UTF-16 units) the kernel keeps for a child; same bound here.
+const CMDLINE_MAX_UNITS: usize = 256;
+// RTL_USER_PROCESS_PARAMETERS.CommandLine (UNICODE_STRING): Length u16 @0x70, Buffer @0x78.
+const PP_COMMAND_LINE: usize = 0x70;
+/// Process-static ANSI copy of the command line (single-threaded; built once).
+static mut CMDLINE_A_BUF: [u8; CMDLINE_MAX_UNITS + 1] = [0; CMDLINE_MAX_UNITS + 1];
+static CMDLINE_A_READY: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+/// `(buffer, length in units)` of `PEB->ProcessParameters->CommandLine`, or None.
+fn peb_command_line() -> Option<(*const u16, usize)> {
+    unsafe {
+        let peb: usize;
+        core::arch::asm!("mov {}, gs:[{off}]", out(reg) peb, off = const TEB_PEB,
+            options(nostack, readonly, preserves_flags));
+        if peb == 0 {
+            return None;
+        }
+        let pp = core::ptr::read((peb + PEB_PROCESS_PARAMETERS) as *const usize);
+        if pp == 0 {
+            return None;
+        }
+        let len = core::ptr::read((pp + PP_COMMAND_LINE) as *const u16) as usize / 2;
+        let buf = core::ptr::read((pp + PP_COMMAND_LINE + 8) as *const usize);
+        if buf == 0 {
+            return None;
+        }
+        Some((buf as *const u16, len))
+    }
+}
+
+/// `GetCommandLineA` [real]: the process command line as ANSI (each UTF-16 unit above
+/// 0xFF becomes `?`), converted once into a process-static buffer.
 #[unsafe(no_mangle)]
 pub extern "system" fn GetCommandLineA() -> *const u8 {
-    CMDLINE_A.as_ptr()
+    use core::sync::atomic::Ordering;
+    let dst = core::ptr::addr_of_mut!(CMDLINE_A_BUF) as *mut u8;
+    if !CMDLINE_A_READY.load(Ordering::Acquire) {
+        if let Some((buf, len)) = peb_command_line() {
+            let n = len.min(CMDLINE_MAX_UNITS);
+            for i in 0..n {
+                let u = unsafe { core::ptr::read(buf.add(i)) };
+                let b = if u <= 0xFF { u as u8 } else { b'?' };
+                unsafe { core::ptr::write(dst.add(i), b) };
+            }
+            unsafe { core::ptr::write(dst.add(n), 0) };
+        }
+        CMDLINE_A_READY.store(true, Ordering::Release);
+    }
+    dst as *const u8
 }
-/// `GetCommandLineW` [stub].
+/// `GetCommandLineW` [real]: `PEB->ProcessParameters->CommandLine.Buffer` (NUL-terminated,
+/// stable for the process lifetime); an empty string if the PEB is unavailable.
 #[unsafe(no_mangle)]
 pub extern "system" fn GetCommandLineW() -> *const u16 {
-    CMDLINE_W.as_ptr()
+    match peb_command_line() {
+        Some((buf, _)) => buf,
+        None => EMPTY_W.as_ptr(),
+    }
 }
 /// `GetEnvironmentStringsW` [real, empty]: an empty block (`\0\0`).
 #[unsafe(no_mangle)]
@@ -1152,9 +1191,37 @@ pub unsafe extern "system" fn CreateProcessA(
         SetLastError(ERROR_FILE_NOT_FOUND);
         return 0;
     }
+    // Whole command line for the child (lpCommandLine, else the application name), widened
+    // into a bounded 256-unit buffer (the kernel's limit); longer -> ERROR_FILENAME_EXCED_RANGE.
+    let line = if cmd_line.is_null() {
+        app_name
+    } else {
+        cmd_line as *const u8
+    };
+    let mut cbuf = [0u16; CMDLINE_MAX_UNITS];
+    let mut cn = 0usize;
+    loop {
+        let b = unsafe { core::ptr::read_volatile(line.add(cn)) };
+        if b == 0 {
+            break;
+        }
+        if cn == CMDLINE_MAX_UNITS {
+            SetLastError(ERROR_FILENAME_EXCED_RANGE);
+            return 0;
+        }
+        cbuf[cn] = u16::from(b);
+        cn += 1;
+    }
     let mut h: isize = 0;
-    let st =
-        unsafe { NtTukosCreateProcess(buf.as_ptr(), (n * 2) as u32, &mut h, core::ptr::null(), 0) };
+    let st = unsafe {
+        NtTukosCreateProcess(
+            buf.as_ptr(),
+            (n * 2) as u32,
+            &mut h,
+            cbuf.as_ptr(),
+            (cn * 2) as u32,
+        )
+    };
     if st < 0 {
         SetLastError(match st {
             STATUS_INSUFFICIENT_RESOURCES => ERROR_NOT_ENOUGH_MEMORY_PROC,

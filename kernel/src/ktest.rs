@@ -104,6 +104,7 @@ const TESTS: &[(&str, TestFn)] = &[
     ("child_fault_reports_status", child_fault_reports_status),
     ("create_process_errors", create_process_errors),
     ("child_sees_command_line", child_sees_command_line),
+    ("program_sees_argv", program_sees_argv),
     (
         "loader_rejects_missing_dependency",
         loader_rejects_missing_dependency,
@@ -456,6 +457,41 @@ fn echo_reads_and_prints() -> Result<(), &'static str> {
         }
     }
     Err("echo nao terminou/recolheu os frames")
+}
+
+/// The `/MT` argv.exe (target/conformance/crt/argv.exe; empty if not built).
+static ARGV_EXE: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/argv.exe"));
+
+/// End to end: the kernel hands "x alpha beta" to the child's PEB, kernel32's
+/// `GetCommandLineA` returns it and the MSVC CRT builds argv from it.
+fn program_sees_argv() -> Result<(), &'static str> {
+    use core::sync::atomic::Ordering;
+    if !have_both_dlls() || ARGV_EXE.is_empty() {
+        return Ok(()); // dlls/argv.exe not embedded on this host: skip.
+    }
+    crate::syscall::LAST_TERMINATE_STATUS.store(u64::MAX, Ordering::SeqCst);
+    crate::syscall::console_log_reset();
+    let before = crate::mem::frames::free_frame_count();
+    let cmd: alloc::vec::Vec<u16> = "x alpha beta".encode_utf16().collect();
+    crate::process::spawn_exe_image_with_k32_cmd(ARGV_EXE.to_vec(), None, &cmd)
+        .map_err(|_| "argv: spawn falhou")?;
+    for _ in 0..40000 {
+        crate::sched::yield_now();
+        let st = crate::syscall::LAST_TERMINATE_STATUS.load(Ordering::SeqCst);
+        if st != u64::MAX {
+            if st != 0 {
+                crate::kprintln!("argv terminou com status {:#x}", st);
+                return Err("argv: exit code != 0");
+            }
+            // CRT text mode: LF becomes CRLF; the console log holds the whole output.
+            crate::syscall::console_log_find(b"3 x alpha beta\r\n", 0)
+                .ok_or("argv: stdout diferente de 3 x alpha beta")?;
+            if crate::mem::frames::free_frame_count() == before {
+                return Ok(());
+            }
+        }
+    }
+    Err("argv nao terminou/recolheu os frames")
 }
 
 /// The `/MT` shell.exe (target/conformance/crt/shell.exe; empty if not built).

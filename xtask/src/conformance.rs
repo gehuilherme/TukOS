@@ -249,6 +249,8 @@ pub fn run_conformance() -> crate::Result<()> {
     let heap = build_exe(&vcvars, &root, "heap", "heap", &k32_lib)?;
     let crt = build_crt_exe(&vcvars, &root, "hello")?;
     let echo = build_crt_exe(&vcvars, &root, "echo")?;
+    // argv.exe is only embedded (ktest `program_sees_argv`; no reference run).
+    let _argv = build_crt_exe(&vcvars, &root, "argv")?;
     let fileio = build_crt_exe(&vcvars, &root, "fileio")?;
     let parent = build_crt_exe(&vcvars, &root, "parent")?;
     // child.exe is built beside parent.exe (same dir = the reference run's CWD).

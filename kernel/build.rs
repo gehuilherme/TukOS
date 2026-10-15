@@ -9,6 +9,7 @@ fn main() {
     embed_conformance(&dir, "heap.exe", "conformance_heap.exe");
     embed_conformance(&dir, "crt/hello.exe", "crt_hello.exe");
     embed_conformance(&dir, "crt/echo.exe", "echo.exe");
+    embed_conformance(&dir, "crt/argv.exe", "argv.exe");
     embed_conformance(&dir, "crt/fileio.exe", "fileio.exe");
     embed_conformance(&dir, "crt/parent.exe", "parent.exe");
     embed_conformance(&dir, "crt/child.exe", "child.exe");
