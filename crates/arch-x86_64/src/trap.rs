@@ -38,6 +38,30 @@ pub fn set_handler(handler: fn(&mut TrapFrame)) {
     HANDLER.store(handler as usize, Ordering::SeqCst);
 }
 
+/// Repairs a corrupted interrupt-return frame so `iretq` cannot `#GP` the kernel.
+///
+/// A well-formed frame returns either to the kernel (`CS == KERNEL_CS`) or to Ring 3
+/// (`CS == USER_CS` and `SS == USER_DS`) — the only valid selectors in TukOS. A rare
+/// state corruption has been observed to leave `0x18` (the user-data selector WITHOUT
+/// RPL 3) in a frame's `CS` or `SS`; returning to Ring 3 with such a selector `#GP`s
+/// the kernel at the `iretq` in `tukos_isr_common`. A user program must never be able
+/// to crash the kernel, so any frame that is neither a clean kernel return nor the
+/// canonical user return is treated as a corrupted user-return frame and repaired to
+/// the only valid user selectors. The caller holds `&mut TrapFrame` over the exact
+/// stack memory `iretq` reloads, so the repair takes effect on return. Clean frames
+/// (the normal path) are left untouched. Returns `true` iff a repair was made.
+pub fn sanitize_return_frame(frame: &mut TrapFrame) -> bool {
+    let kernel_cs = crate::gdt::KERNEL_CS as u64;
+    let user_cs = crate::gdt::USER_CS as u64;
+    let user_ds = crate::gdt::USER_DS as u64;
+    if frame.cs != kernel_cs && (frame.cs != user_cs || frame.ss != user_ds) {
+        frame.cs = user_cs;
+        frame.ss = user_ds;
+        return true;
+    }
+    false
+}
+
 #[cfg(target_os = "none")]
 core::arch::global_asm!(
     r#"
@@ -156,6 +180,37 @@ extern "C" fn tukos_trap_entry(frame: &mut TrapFrame) {
 mod tests {
     use super::*;
     use core::mem::offset_of;
+
+    fn zeroed_frame(cs: u64, ss: u64) -> TrapFrame {
+        let mut f: TrapFrame = unsafe { core::mem::zeroed() };
+        f.cs = cs;
+        f.ss = ss;
+        f
+    }
+
+    #[test]
+    fn sanitize_leaves_clean_frames_untouched() {
+        use crate::gdt::{KERNEL_CS, USER_CS, USER_DS};
+        let mut k = zeroed_frame(KERNEL_CS as u64, 0);
+        assert!(!sanitize_return_frame(&mut k));
+        let mut u = zeroed_frame(USER_CS as u64, USER_DS as u64);
+        assert!(!sanitize_return_frame(&mut u));
+        assert_eq!(u.cs, USER_CS as u64);
+        assert_eq!(u.ss, USER_DS as u64);
+    }
+
+    #[test]
+    fn sanitize_repairs_corrupted_selectors() {
+        use crate::gdt::{USER_CS, USER_DS};
+        // Bad SS (0x18 = user-data selector without RPL 3), good CS.
+        let mut a = zeroed_frame(USER_CS as u64, 0x18);
+        assert!(sanitize_return_frame(&mut a));
+        assert_eq!((a.cs, a.ss), (USER_CS as u64, USER_DS as u64));
+        // Bad CS (a data selector in CS), good SS.
+        let mut b = zeroed_frame(0x18, USER_DS as u64);
+        assert!(sanitize_return_frame(&mut b));
+        assert_eq!((b.cs, b.ss), (USER_CS as u64, USER_DS as u64));
+    }
 
     #[test]
     fn trap_frame_layout_matches_assembly_stub() {

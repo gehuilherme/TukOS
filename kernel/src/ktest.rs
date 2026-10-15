@@ -136,6 +136,7 @@ const TESTS: &[(&str, TestFn)] = &[
     ("shell_runs_command", shell_runs_command),
     ("shell_unknown_and_help", shell_unknown_and_help),
     ("shell_echo_args", shell_echo_args),
+    ("shell_quoted_arg_survives", shell_quoted_arg_survives),
     ("two_modules_no_overlap", two_modules_no_overlap),
     (
         "import_resolve_rejects_bad_iat_slot",
@@ -600,6 +601,39 @@ fn shell_echo_args() -> Result<(), &'static str> {
                 return Err("shell: echo antigo (voce digitou) ainda em uso");
             }
             crate::syscall::console_log_find(b"tukos> ", t).ok_or("shell: sem 2o prompt")?;
+            return Ok(());
+        }
+    }
+    Err("shell nao terminou/recolheu os frames")
+}
+
+/// Regression (fix-gp-shell-input): the shell input `help "teste"` (a builtin with a
+/// quoted argument — the exact line that #GP'd the kernel on real hardware) must never
+/// crash the kernel. The shell handles the quoted builtin and exits cleanly. The
+/// iret-frame repair that prevents the #GP is unit-tested in
+/// `arch_x86_64::trap::sanitize_return_frame`; here we check the end-to-end shell run.
+fn shell_quoted_arg_survives() -> Result<(), &'static str> {
+    use core::sync::atomic::Ordering;
+    if !have_both_dlls() || SHELL_EXE.is_empty() {
+        return Ok(()); // dlls/shell.exe not embedded on this host: skip.
+    }
+    while crate::kbd::try_pop_input().is_some() {}
+    crate::syscall::LAST_TERMINATE_STATUS.store(u64::MAX, Ordering::SeqCst);
+    crate::syscall::console_log_reset();
+    let before = crate::mem::frames::free_frame_count();
+    crate::process::spawn_exe_image_with_k32(SHELL_EXE.to_vec());
+    crate::kbd::test_push_input(b"help \"teste\"\nexit\n");
+    for _ in 0..200_000 {
+        crate::sched::yield_now();
+        let st = crate::syscall::LAST_TERMINATE_STATUS.load(Ordering::SeqCst);
+        if st != u64::MAX && crate::mem::frames::free_frame_count() == before {
+            if st != 0 {
+                crate::kprintln!("shell terminou com status {:#x}", st);
+                return Err("shell: exit code != 0");
+            }
+            // The quoted builtin must have been handled (help listing present).
+            crate::syscall::console_log_find(b"comandos:", 0)
+                .ok_or("shell: help nao listou os comandos")?;
             return Ok(());
         }
     }

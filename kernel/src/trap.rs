@@ -5,6 +5,10 @@ use core::sync::atomic::{AtomicU64, Ordering};
 
 pub static BREAKPOINTS: AtomicU64 = AtomicU64::new(0);
 
+/// Counts how many times `handle` had to repair a corrupted return-to-Ring-3 iret
+/// frame (see the defense-in-depth block in `handle`). 0 in normal operation.
+pub static SEGMENT_FIXUPS: AtomicU64 = AtomicU64::new(0);
+
 const BREAKPOINT: u64 = 3;
 
 const NAMES: [&str; 32] = [
@@ -61,6 +65,17 @@ pub fn fault_status(vector: u64) -> u32 {
 }
 
 pub fn handle(frame: &mut TrapFrame) {
+    // Defense-in-depth: repair a corrupted return-to-Ring-3 iret frame so a rare,
+    // not-yet-isolated state corruption (a stray 0x18 selector in CS/SS) can never
+    // #GP the kernel at `iretq`. See `arch_x86_64::trap::sanitize_return_frame`.
+    // Clean frames (the normal path) are untouched. Root cause tracked in
+    // docs/observations/2026-10-15-kernel-gp-shell-input.md.
+    if arch_x86_64::trap::sanitize_return_frame(frame)
+        && SEGMENT_FIXUPS.fetch_add(1, Ordering::SeqCst) == 0
+    {
+        crate::kprintln!("trap: frame de retorno a Ring 3 reparado (selector corrompido)");
+    }
+
     if frame.vector == arch_x86_64::lapic::TIMER_VECTOR as u64 {
         crate::apic::on_timer();
         return;
