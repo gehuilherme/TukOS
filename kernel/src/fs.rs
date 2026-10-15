@@ -25,6 +25,19 @@ const FILES: &[(&str, &[u8])] = &[
         "child.exe",
         include_bytes!(concat!(env!("OUT_DIR"), "/child.exe")),
     ),
+    // Shell and its commands.
+    (
+        "shell.exe",
+        include_bytes!(concat!(env!("OUT_DIR"), "/shell.exe")),
+    ),
+    (
+        "hello.exe",
+        include_bytes!(concat!(env!("OUT_DIR"), "/crt_hello.exe")),
+    ),
+    (
+        "echo.exe",
+        include_bytes!(concat!(env!("OUT_DIR"), "/echo.exe")),
+    ),
 ];
 
 /// Normalizes `path` to the table's key form; `None` for paths that must never

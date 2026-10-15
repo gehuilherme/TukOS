@@ -100,6 +100,7 @@ fn build_crt_exe(vcvars: &Path, root: &Path, name: &str) -> crate::Result<PathBu
         "echo" => "echo",
         "fileio" => "fileio",
         "parent" | "child" => "spawn",
+        "shell" => "shell",
         _ => "crt",
     };
     let src = root
@@ -232,6 +233,9 @@ pub fn run_conformance() -> crate::Result<()> {
     let parent = build_crt_exe(&vcvars, &root, "parent")?;
     // child.exe is built beside parent.exe (same dir = the reference run's CWD).
     let _child = build_crt_exe(&vcvars, &root, "child")?;
+    // shell.exe is embedded in the initrd (ktest `shell_runs_command`; no reference run:
+    // it reads the keyboard until EOF).
+    let _shell = build_crt_exe(&vcvars, &root, "shell")?;
     run_case("ntdll", &hello, &["conformance"], b"", None)?;
     run_case("kernel32", &hello32, &["conformance32"], b"", None)?;
     run_case("heap", &heap, &["conformance_heap"], b"", None)?;

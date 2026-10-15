@@ -131,6 +131,7 @@ const TESTS: &[(&str, TestFn)] = &[
     ("program_reads_file", program_reads_file),
     ("program_spawns_child", program_spawns_child),
     ("echo_reads_and_prints", echo_reads_and_prints),
+    ("shell_runs_command", shell_runs_command),
     ("two_modules_no_overlap", two_modules_no_overlap),
     (
         "import_resolve_rejects_bad_iat_slot",
@@ -453,6 +454,50 @@ fn echo_reads_and_prints() -> Result<(), &'static str> {
         }
     }
     Err("echo nao terminou/recolheu os frames")
+}
+
+/// The `/MT` shell.exe (target/conformance/crt/shell.exe; empty if not built).
+static SHELL_EXE: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/shell.exe"));
+
+/// Scripted shell session: the keyboard is pre-fed "hello\nexit\n"; the Ring-3 shell prints
+/// its prompt, reads "hello", CreateProcess(hello.exe) FROM RING 3, waits, prints the next
+/// prompt, reads "exit" and returns. Asserts the console shows prompt -> Hello -> prompt,
+/// and that both processes were reaped (frames back to baseline).
+fn shell_runs_command() -> Result<(), &'static str> {
+    use core::sync::atomic::Ordering;
+    if !have_both_dlls()
+        || SHELL_EXE.is_empty()
+        || crate::fs::lookup("hello.exe").is_none_or(<[u8]>::is_empty)
+    {
+        return Ok(()); // dlls/shell.exe/hello.exe not embedded on this host: skip.
+    }
+    while crate::kbd::try_pop_input().is_some() {}
+    crate::syscall::LAST_TERMINATE_STATUS.store(u64::MAX, Ordering::SeqCst);
+    crate::syscall::console_log_reset();
+    crate::kbd::test_push_input(b"hello\nexit\n");
+    let before = crate::mem::frames::free_frame_count();
+    crate::process::spawn_exe_image_with_k32(SHELL_EXE.to_vec());
+    for _ in 0..200_000 {
+        crate::sched::yield_now();
+        let st = crate::syscall::LAST_TERMINATE_STATUS.load(Ordering::SeqCst);
+        if st != u64::MAX && crate::mem::frames::free_frame_count() == before {
+            if (0xC000_7001..=0xC000_700A).contains(&st) || st != 0 {
+                crate::kprintln!("shell terminou com status {:#x}", st);
+                return Err("shell: exit code != 0 (loader ou CreateProcess falhou)");
+            }
+            let p1 =
+                crate::syscall::console_log_find(b"tukos> ", 0).ok_or("shell: prompt ausente")?;
+            let h = crate::syscall::console_log_find(b"Hello, TukOS!\r\n", p1)
+                .ok_or("shell: saida do hello.exe ausente")?;
+            // A second prompt after the child's output proves the shell waited and looped.
+            crate::syscall::console_log_find(b"tukos> ", h).ok_or("shell: sem 2o prompt")?;
+            if crate::syscall::console_log_find(b"comando nao encontrado", 0).is_some() {
+                return Err("shell: CreateProcess(hello.exe) falhou");
+            }
+            return Ok(());
+        }
+    }
+    Err("shell nao terminou/recolheu os frames")
 }
 
 const EXE_BASE: u64 = 0x40_0000;

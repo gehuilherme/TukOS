@@ -20,9 +20,13 @@ static CONFORMANCE_EXE: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/confor
     feature = "conformance_crt",
     not(feature = "conformance_echo"),
     not(feature = "conformance_fileio"),
-    not(feature = "conformance_spawn")
+    not(feature = "conformance_spawn"),
+    not(feature = "shell")
 ))]
 static CONFORMANCE_EXE: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/crt_hello.exe"));
+/// With `shell` the program is the `/MT` shell.exe (reads commands from the keyboard).
+#[cfg(feature = "shell")]
+static CONFORMANCE_EXE: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/shell.exe"));
 /// With `conformance_echo` the program is the `/MT` echo.exe; stdin is pre-fed "teste\n".
 #[cfg(feature = "conformance_echo")]
 static CONFORMANCE_EXE: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/echo.exe"));

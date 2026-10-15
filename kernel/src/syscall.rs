@@ -75,6 +75,27 @@ pub fn stack_arg(user_rsp: u64, index: u64) -> Option<u64> {
     Some(u64::from_le_bytes(bytes.as_slice().try_into().ok()?))
 }
 
+/// Everything user programs wrote to the console via NtWriteFile (ktest only; first 1 KiB).
+#[cfg(feature = "ktest")]
+static CONSOLE_LOG: IrqMutex<([u8; 1024], usize)> = IrqMutex::new(([0; 1024], 0));
+#[cfg(feature = "ktest")]
+pub fn console_log_reset() {
+    CONSOLE_LOG.lock().1 = 0;
+}
+/// Byte offset of the first occurrence of `needle` at or after `from` in the console log.
+#[cfg(feature = "ktest")]
+pub fn console_log_find(needle: &[u8], from: usize) -> Option<usize> {
+    let g = CONSOLE_LOG.lock();
+    let hay = &g.0[..g.1];
+    if from > hay.len() || needle.is_empty() {
+        return None;
+    }
+    hay[from..]
+        .windows(needle.len())
+        .position(|w| w == needle)
+        .map(|i| i + from)
+}
+
 /// Console echo log (ktest only): everything `nt_read_file` echoed.
 #[cfg(feature = "ktest")]
 static ECHO: IrqMutex<([u8; 64], usize)> = IrqMutex::new(([0; 64], 0));
@@ -408,6 +429,14 @@ fn nt_write_file(handle: u64, iosb: u64, buf: u64, len: u64) -> u64 {
         g[..n].copy_from_slice(&bytes[..n]);
         drop(g);
         LAST_WRITE_LEN.store(bytes.len() as u64, Ordering::SeqCst);
+        let mut log = CONSOLE_LOG.lock();
+        for &b in &bytes {
+            if log.1 < 1024 {
+                let i = log.1;
+                log.0[i] = b;
+                log.1 += 1;
+            }
+        }
     }
     // IO_STATUS_BLOCK (x64) is { union { NTSTATUS Status; PVOID Pointer; }; ULONG_PTR
     // Information; }. Simplification: Status is stored as a full u64 (low 4 bytes =

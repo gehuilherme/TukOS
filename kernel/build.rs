@@ -12,6 +12,7 @@ fn main() {
     embed_conformance(&dir, "crt/fileio.exe", "fileio.exe");
     embed_conformance(&dir, "crt/parent.exe", "parent.exe");
     embed_conformance(&dir, "crt/child.exe", "child.exe");
+    embed_conformance(&dir, "crt/shell.exe", "shell.exe");
 
     // Embed the ntdll.dll produced by `cargo xtask ntdll` (we only copy the
     // artifact: no nested cargo, so no target-lock contention). If it is
