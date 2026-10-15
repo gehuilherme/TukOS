@@ -70,6 +70,8 @@ pub fn echo_is(expected: &[u8]) -> bool {
 
 /// Writes `bytes` to the console (framebuffer + serial via `kprint!`) as an echo.
 fn console_echo(bytes: &[u8]) {
+    // The echo conformance run compares stdout only: a pre-fed (piped) stdin has no echo.
+    #[cfg(not(feature = "conformance_echo"))]
     if let Ok(s) = core::str::from_utf8(bytes) {
         crate::kprint!("{s}");
     }
@@ -99,6 +101,7 @@ const MAX_CONSOLE_READ: usize = 4096;
 /// cannot fire while the syscall runs with IF=0) and yields. No lock is held
 /// across `yield_now`: `try_pop_input` takes and releases its own lock.
 fn nt_read_file(handle: u64, iosb: u64, buf: u64, len: u64) -> u64 {
+    let len = len as u32 as u64; // ULONG: the upper half of the slot is undefined
     let obj = crate::sched::with_current_handles(|t| t.get(handle).cloned()).flatten();
     if obj != Some(crate::object::Object::ConsoleInput) {
         return STATUS_INVALID_HANDLE;
@@ -145,6 +148,9 @@ fn nt_read_file(handle: u64, iosb: u64, buf: u64, len: u64) -> u64 {
 
 /// Core of NtWriteFile once the stack arguments are decoded.
 fn nt_write_file(handle: u64, iosb: u64, buf: u64, len: u64) -> u64 {
+    // `Length` is a ULONG: the upper half of its stack slot is undefined (callers only
+    // write the low 32 bits).
+    let len = len as u32 as u64;
     let obj = crate::sched::with_current_handles(|t| t.get(handle).cloned()).flatten();
     if obj != Some(crate::object::Object::Console) {
         return STATUS_INVALID_HANDLE;

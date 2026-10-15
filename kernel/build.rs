@@ -8,6 +8,7 @@ fn main() {
     embed_conformance(&dir, "hello32.exe", "conformance32.exe");
     embed_conformance(&dir, "heap.exe", "conformance_heap.exe");
     embed_conformance(&dir, "crt/hello.exe", "crt_hello.exe");
+    embed_conformance(&dir, "crt/echo.exe", "echo.exe");
 
     // Embed the ntdll.dll produced by `cargo xtask ntdll` (we only copy the
     // artifact: no nested cargo, so no target-lock contention). If it is

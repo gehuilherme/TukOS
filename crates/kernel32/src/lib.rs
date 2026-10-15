@@ -295,6 +295,37 @@ pub unsafe extern "system" fn ReadConsoleA(
     unsafe { read_via_nt(handle, buf, to_read, read) }
 }
 
+/// `ReadConsoleW`: reads a line like `ReadConsoleA`, widening each byte (Latin-1/ASCII)
+/// to UTF-16. At most 512 chars per call; `_input_control` is ignored.
+///
+/// # Safety
+/// `buf` must be valid for `to_read` u16 units; `read` is null or writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn ReadConsoleW(
+    handle: isize,
+    buf: *mut u16,
+    to_read: u32,
+    read: *mut u32,
+    _input_control: *mut c_void,
+) -> i32 {
+    let mut tmp = [0u8; 512];
+    let want = core::cmp::min(to_read as usize, tmp.len()) as u32;
+    let mut got = 0u32;
+    if unsafe { read_via_nt(handle, tmp.as_mut_ptr(), want, &mut got) } == 0 {
+        if !read.is_null() {
+            unsafe { core::ptr::write(read, 0) };
+        }
+        return 0;
+    }
+    for (i, &b) in tmp[..got as usize].iter().enumerate() {
+        unsafe { core::ptr::write(buf.add(i), b as u16) };
+    }
+    if !read.is_null() {
+        unsafe { core::ptr::write(read, got) };
+    }
+    1
+}
+
 /// `ExitProcess` over `NtTerminateProcess(NtCurrentProcess(), code)`.
 #[unsafe(no_mangle)]
 pub extern "system" fn ExitProcess(code: u32) -> ! {

@@ -93,35 +93,51 @@ fn build_exe(
 
 /// Compiles `conformance/crt/hello.c` WITH the static MSVC CRT (`/MT /GS-`, default
 /// `mainCRTStartup` entry, libcmt) into `target/conformance/crt/hello.exe`.
-fn build_crt_exe(vcvars: &Path, root: &Path) -> crate::Result<PathBuf> {
+fn build_crt_exe(vcvars: &Path, root: &Path, name: &str) -> crate::Result<PathBuf> {
     let outdir = root.join("target").join("conformance").join("crt");
     std::fs::create_dir_all(&outdir).map_err(|e| e.to_string())?;
-    let src = root.join("conformance").join("crt").join("hello.c");
+    let srcdir = if name == "echo" { "echo" } else { "crt" };
+    let src = root
+        .join("conformance")
+        .join(srcdir)
+        .join(format!("{name}.c"));
     let bat = outdir.join("build-crt.bat");
     let script = format!(
         "@echo off\r\n\
          call \"{vcvars}\" >nul || exit /b 1\r\n\
          cd /d \"{outdir}\" || exit /b 1\r\n\
-         cl /nologo /MT /GS- \"{src}\" /link /nologo /OUT:hello.exe || exit /b 1\r\n",
+         cl /nologo /MT /GS- \"{src}\" /link /nologo /OUT:{name}.exe || exit /b 1\r\n",
         vcvars = vcvars.display(),
         outdir = outdir.display(),
         src = src.display(),
+        name = name,
     );
     std::fs::write(&bat, script).map_err(|e| e.to_string())?;
     run(Command::new("cmd").arg("/C").arg(&bat))?;
-    let exe = outdir.join("hello.exe");
+    let exe = outdir.join(format!("{name}.exe"));
     exe.is_file()
         .then_some(exe)
-        .ok_or_else(|| "crt/hello.exe nao foi gerado".to_string())
+        .ok_or_else(|| format!("crt/{name}.exe nao foi gerado"))
 }
 
 /// One case: run `exe` on the real Windows, boot the kernel built with `features`, compare.
-fn run_case(label: &str, exe: &Path, features: &[&str]) -> crate::Result<()> {
+fn run_case(label: &str, exe: &Path, features: &[&str], stdin: &[u8]) -> crate::Result<()> {
     // Reference: the same binary on the real Windows (binds to the real DLLs).
-    let reference = Command::new(exe)
+    let mut child = Command::new(exe)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
         .stderr(Stdio::inherit())
-        .output()
+        .spawn()
         .map_err(|e| format!("falha ao executar {}: {e}", exe.display()))?;
+    {
+        use std::io::Write;
+        let mut si = child.stdin.take().ok_or("sem stdin do filho")?;
+        // A program that never reads stdin may exit first: ignore a broken pipe.
+        let _ = si.write_all(stdin);
+    }
+    let reference = child
+        .wait_with_output()
+        .map_err(|e| format!("falha ao esperar {}: {e}", exe.display()))?;
     let want_code = reference
         .status
         .code()
@@ -192,11 +208,13 @@ pub fn run_conformance() -> crate::Result<()> {
     let hello = build_exe(&vcvars, &root, "hello", "hello", &ntdll_lib)?;
     let hello32 = build_exe(&vcvars, &root, "hello32", "hello32", &k32_lib)?;
     let heap = build_exe(&vcvars, &root, "heap", "heap", &k32_lib)?;
-    let crt = build_crt_exe(&vcvars, &root)?;
-    run_case("ntdll", &hello, &["conformance"])?;
-    run_case("kernel32", &hello32, &["conformance32"])?;
-    run_case("heap", &heap, &["conformance_heap"])?;
-    run_case("crt", &crt, &["conformance_crt"])?;
+    let crt = build_crt_exe(&vcvars, &root, "hello")?;
+    let echo = build_crt_exe(&vcvars, &root, "echo")?;
+    run_case("ntdll", &hello, &["conformance"], b"")?;
+    run_case("kernel32", &hello32, &["conformance32"], b"")?;
+    run_case("heap", &heap, &["conformance_heap"], b"")?;
+    run_case("crt", &crt, &["conformance_crt"], b"")?;
+    run_case("echo", &echo, &["conformance_echo"], b"teste\n")?;
     Ok(())
 }
 

@@ -125,6 +125,7 @@ const TESTS: &[(&str, TestFn)] = &[
     ("kernel32_embedded_parses", kernel32_embedded_parses),
     ("kernel32_exports_crt_surface", kernel32_exports_crt_surface),
     ("crt_hello_runs", crt_hello_runs),
+    ("echo_reads_and_prints", echo_reads_and_prints),
     ("two_modules_no_overlap", two_modules_no_overlap),
     (
         "import_resolve_rejects_bad_iat_slot",
@@ -396,6 +397,47 @@ fn crt_hello_runs() -> Result<(), &'static str> {
         }
     }
     Err("crt hello nao terminou/recolheu os frames")
+}
+
+/// The `/MT` echo.exe (target/conformance/crt/echo.exe; empty if not built).
+static ECHO_EXE: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/echo.exe"));
+
+/// End to end: input ring buffer -> NtReadFile (echo) -> CRT fgets -> printf -> WriteFile.
+fn echo_reads_and_prints() -> Result<(), &'static str> {
+    use core::sync::atomic::Ordering;
+    if !have_both_dlls() || ECHO_EXE.is_empty() {
+        return Ok(()); // dlls/echo.exe not embedded on this host: skip.
+    }
+    while crate::kbd::try_pop_input().is_some() {}
+    crate::syscall::LAST_TERMINATE_STATUS.store(u64::MAX, Ordering::SeqCst);
+    crate::syscall::LAST_WRITE_LEN.store(0, Ordering::SeqCst);
+    crate::syscall::echo_reset();
+    crate::kbd::test_push_input(b"teste\n");
+    let before = crate::mem::frames::free_frame_count();
+    crate::process::spawn_exe_image_with_k32(ECHO_EXE.to_vec());
+    for _ in 0..40000 {
+        crate::sched::yield_now();
+        let st = crate::syscall::LAST_TERMINATE_STATUS.load(Ordering::SeqCst);
+        if st != u64::MAX {
+            if st != 0 {
+                crate::kprintln!("echo terminou com status {:#x}", st);
+                return Err("echo: exit code != 0 (loader ou fgets falhou)");
+            }
+            // CRT text mode: LF becomes CRLF on stdout (21 bytes).
+            if crate::syscall::LAST_WRITE_LEN.load(Ordering::SeqCst) != 21
+                || !crate::syscall::last_write_is(b"voce digitou: teste\r\n")
+            {
+                return Err("echo: stdout diferente do esperado (voce digitou: teste)");
+            }
+            if !crate::syscall::echo_is(b"teste\n") {
+                return Err("echo: eco da linha digitada ausente/errado");
+            }
+            if crate::mem::frames::free_frame_count() == before {
+                return Ok(());
+            }
+        }
+    }
+    Err("echo nao terminou/recolheu os frames")
 }
 
 const EXE_BASE: u64 = 0x40_0000;

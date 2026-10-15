@@ -16,8 +16,11 @@ static CONFORMANCE_EXE: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/confor
 ))]
 static CONFORMANCE_EXE: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/conformance32.exe"));
 /// With `conformance_crt` the program is the real `/MT` CRT hello.exe (exe+kernel32+ntdll).
-#[cfg(feature = "conformance_crt")]
+#[cfg(all(feature = "conformance_crt", not(feature = "conformance_echo")))]
 static CONFORMANCE_EXE: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/crt_hello.exe"));
+/// With `conformance_echo` the program is the `/MT` echo.exe; stdin is pre-fed "teste\n".
+#[cfg(feature = "conformance_echo")]
+static CONFORMANCE_EXE: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/echo.exe"));
 /// With `conformance_heap` the program is heap.exe (HeapAlloc/HeapFree, exits 7).
 #[cfg(all(feature = "conformance_heap", not(feature = "conformance_crt")))]
 static CONFORMANCE_EXE: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/conformance_heap.exe"));
@@ -31,6 +34,8 @@ pub fn run() -> ! {
         crate::qemu::exit(crate::qemu::ExitCode::Failure);
     }
     crate::syscall::LAST_TERMINATE_STATUS.store(u64::MAX, core::sync::atomic::Ordering::SeqCst);
+    #[cfg(feature = "conformance_echo")]
+    crate::kbd::test_push_input(b"teste\n");
     let before = crate::mem::frames::free_frame_count();
     kprintln!("@@TUKOS-CONFORMANCE-BEGIN");
     #[cfg(not(feature = "conformance32"))]
