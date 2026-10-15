@@ -156,6 +156,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "gfx"
+version = "0.1.0"
+
+[[package]]
 name = "gpt"
 version = "4.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -372,6 +376,7 @@ name = "tukos-kernel"
 version = "0.1.0"
 dependencies = [
  "arch-x86_64",
+ "gfx",
  "kbd",
  "limine",
  "mm",

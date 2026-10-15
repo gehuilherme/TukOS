@@ -41,6 +41,8 @@ fn main() -> ExitCode {
             "pe",
             "-p",
             "kbd",
+            "-p",
+            "gfx",
         ])),
         _ => {
             eprintln!("{USAGE}");

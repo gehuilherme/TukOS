@@ -1274,39 +1274,105 @@ fn fb_fill_and_read() -> Result<(), &'static str> {
     if bpp != 32 || w < 64 || h < 64 {
         return Err("fb_info inesperado");
     }
-    let color = 0x00AB_CDEF;
-    fill_rect(10, 10, 5, 5, color);
-    if pixel(10, 10) != Some(color) || pixel(14, 14) != Some(color) {
+    let (a, b) = (0x0011_2233, 0x00FF_0000);
+    let keep_a = |pts: &[(u32, u32)]| pts.iter().all(|&(x, y)| pixel(x, y) == Some(a));
+    fill_rect(0, 0, w, h, a);
+    // Basic fill + exact edges.
+    fill_rect(10, 10, 5, 5, b);
+    if pixel(10, 10) != Some(b) || pixel(14, 14) != Some(b) {
         return Err("rect nao preenchido");
     }
-    if pixel(15, 15) == Some(color) || pixel(9, 9) == Some(color) {
+    if !keep_a(&[(15, 15), (9, 9), (15, 10), (10, 15)]) {
         return Err("rect vazou para fora");
     }
-    // Clamp: rect beyond the right/bottom edge (and a huge one) must not fault.
-    fill_rect(w - 2, h - 2, 100, 100, color);
-    fill_rect(0, 0, u32::MAX, u32::MAX, 0x0011_2233);
-    fill_rect(w - 1, h - 1, u32::MAX, u32::MAX, color);
-    if pixel(w - 1, h - 1) != Some(color) {
-        return Err("canto final nao preenchido");
+    fill_rect(10, 10, 5, 5, a);
+    // Off-screen origins must write nothing at all (no wrap into other rows).
+    fill_rect(w, 0, 10, 10, b);
+    fill_rect(w + 5, 3, 1000, 1000, b);
+    fill_rect(0, h, 10, 10, b);
+    fill_rect(5, h + 7, u32::MAX, u32::MAX, b);
+    fill_rect(u32::MAX, u32::MAX, u32::MAX, u32::MAX, b);
+    if !keep_a(&[
+        (0, 0),
+        (5, 1),
+        (w - 1, 0),
+        (0, 1),
+        (w - 1, 3),
+        (0, h - 1),
+        (5, h - 1),
+    ]) {
+        return Err("fill fora da tela corrompeu pixels dentro");
     }
-    // Fully off-screen rect writes nothing and is not readable.
-    fill_rect(w + 5, 0, 10, 10, 0x00FF_0000);
-    fill_rect(0, h, 10, 10, 0x00FF_0000);
-    fill_rect(u32::MAX, u32::MAX, u32::MAX, u32::MAX, 0x00FF_0000);
+    // Oversized fill at the far corner sets only the 2x2 in-bounds region.
+    fill_rect(w - 2, h - 2, 100, 100, b);
+    let in2 = [
+        (w - 2, h - 2),
+        (w - 1, h - 2),
+        (w - 2, h - 1),
+        (w - 1, h - 1),
+    ];
+    if !in2.iter().all(|&(x, y)| pixel(x, y) == Some(b)) {
+        return Err("2x2 do canto nao preenchido");
+    }
+    if !keep_a(&[
+        (w - 3, h - 3),
+        (w - 3, h - 1),
+        (w - 1, h - 3),
+        (0, h - 1),
+        (0, 0),
+    ]) {
+        return Err("fill no canto vazou");
+    }
+    // Huge rect from origin fills everything without faulting.
+    fill_rect(0, 0, u32::MAX, u32::MAX, b);
+    if pixel(0, 0) != Some(b) || pixel(w - 1, h - 1) != Some(b) {
+        return Err("fill gigante nao cobriu a tela");
+    }
     if pixel(w, 0).is_some() || pixel(0, h).is_some() {
         return Err("pixel fora do fb legivel");
     }
-    // Text partly/fully off-screen must clamp too.
-    text_out(w - 3, h - 3, b"AB", 0x00FF_FFFF, 0);
-    text_out(w + 10, h + 10, b"AB", 0x00FF_FFFF, 0);
-    text_out(5, 5, b"Hi", 0x00FF_FFFF, 0x0000_0000);
-    let mut lit = false;
-    for y in 5..21 {
-        for x in 5..21 {
-            lit |= pixel(x, y).is_some_and(|p| p != 0);
-        }
+    // Text: only the glyph box may change.
+    fill_rect(0, 0, w, h, a);
+    let (cw, ch) = (
+        crate::fbcon::FbCon::cell_width() as u32,
+        crate::fbcon::FbCon::cell_height() as u32,
+    );
+    text_out(w + 10, h + 10, b"AB", b, 0);
+    text_out(w, 0, b"AB", b, 0);
+    text_out(0, h, b"AB", b, 0);
+    if !keep_a(&[
+        (0, 0),
+        (w - 1, 0),
+        (0, h - 1),
+        (w - 1, h - 1),
+        (w / 2, h / 2),
+    ]) {
+        return Err("texto fora da tela escreveu");
     }
-    if !lit {
+    text_out(w - 3, h - 3, b"AB", b, 0);
+    if !keep_a(&[
+        (w - 4, h - 4),
+        (w - 4, h - 1),
+        (w - 1, h - 4),
+        (0, h - 1),
+        (0, 0),
+    ]) {
+        return Err("texto no canto escreveu fora da caixa");
+    }
+    // Background painted inside the glyph box, nothing outside it.
+    text_out(40, 40, b"Hi", b, 0x0000_00FF);
+    let outside = [
+        (39, 40),
+        (40, 39),
+        (40 + 2 * cw, 40),
+        (40, 40 + ch),
+        (40 + 2 * cw - 1, 40 + ch),
+        (39, 40 + ch - 1),
+    ];
+    if !keep_a(&outside) {
+        return Err("texto escreveu fora da caixa do glifo");
+    }
+    if pixel(40, 40) == Some(a) {
         return Err("texto nao desenhado");
     }
     if let Some(con) = crate::fbcon::FBCON.lock().as_mut() {

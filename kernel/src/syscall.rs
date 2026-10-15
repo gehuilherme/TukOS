@@ -29,7 +29,7 @@ pub const NT_WAIT: u64 = 12;
 pub const NT_QUERY_EXIT_CODE: u64 = 13;
 /// `(out_fbinfo_ptr)`: writes `FbInfo { width, height, bpp }` (3 x u32).
 pub const NT_GDI_GET_FB_INFO: u64 = 14;
-/// `(x, y, w, h, color_argb)`; color on the user stack.
+/// `(x, y, w, h, color)`; color (0x00RRGGBB, alpha byte ignored) on the user stack.
 pub const NT_GDI_FILL_RECT: u64 = 15;
 /// `(x, y, str_ptr, len, fg, bg)`; fg/bg on the user stack.
 pub const NT_GDI_TEXT_OUT: u64 = 16;

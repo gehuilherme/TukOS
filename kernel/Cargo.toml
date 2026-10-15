@@ -16,6 +16,7 @@ arch-x86_64 = { path = "../crates/arch-x86_64" }
 limine = "0.5"
 mm = { path = "../crates/mm" }
 kbd = { path = "../crates/kbd" }
+gfx = { path = "../crates/gfx" }
 pe = { path = "../crates/pe" }
 spin = "0.10"
 noto-sans-mono-bitmap = { version = "0.3", default-features = false, features = ["regular", "size_16", "unicode-basic-latin", "unicode-specials"] }

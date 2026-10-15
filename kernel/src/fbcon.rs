@@ -56,12 +56,11 @@ impl FbCon {
 
     /// Fills a rectangle, clamped to the framebuffer (no overflow, no OOB writes).
     pub fn fill_rect(&mut self, x: u32, y: u32, w: u32, h: u32, color: u32) {
-        let (x, y) = (x as usize, y as usize);
-        if x >= self.width || y >= self.height {
+        let Some((x, y, x1, y1)) =
+            gfx::clamp_rect(x, y, w, h, self.width as u32, self.height as u32)
+        else {
             return;
-        }
-        let x1 = x.saturating_add(w as usize).min(self.width);
-        let y1 = y.saturating_add(h as usize).min(self.height);
+        };
         for yy in y..y1 {
             for xx in x..x1 {
                 self.put_raw(xx, yy, color & 0x00FF_FFFF);
