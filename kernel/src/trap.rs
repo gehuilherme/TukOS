@@ -49,6 +49,17 @@ pub fn exception_name(vector: u64) -> &'static str {
     NAMES.get(vector as usize).copied().unwrap_or("UNKNOWN")
 }
 
+/// NTSTATUS a waiting parent sees for a child killed by a Ring-3 exception
+/// (never 0 and never STILL_ACTIVE=259).
+pub fn fault_status(vector: u64) -> u32 {
+    match vector {
+        0 => 0xC000_0094,  // INTEGER_DIVIDE_BY_ZERO
+        6 => 0xC000_001D,  // ILLEGAL_INSTRUCTION
+        12 => 0xC000_00FD, // STACK_OVERFLOW
+        _ => 0xC000_0005,  // ACCESS_VIOLATION (#PF, #GP, others)
+    }
+}
+
 pub fn handle(frame: &mut TrapFrame) {
     if frame.vector == arch_x86_64::lapic::TIMER_VECTOR as u64 {
         crate::apic::on_timer();
@@ -74,7 +85,7 @@ pub fn handle(frame: &mut TrapFrame) {
             frame.rip,
             cr2
         );
-        crate::sched::exit_current();
+        crate::sched::exit_current_with(fault_status(frame.vector));
     }
     // CPL 0: a kernel fault is our bug.
     panic!(

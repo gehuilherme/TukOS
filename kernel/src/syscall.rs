@@ -21,6 +21,12 @@ pub const NT_OPEN_FILE: u64 = 8;
 pub const NT_SET_FILE_POINTER: u64 = 9;
 /// `(handle, out_size_u64_ptr)`; see `nt_query_file_size`.
 pub const NT_QUERY_FILE_SIZE: u64 = 10;
+/// TukOS-specific `(path_utf16, path_len_bytes, out_process_handle_ptr)`; see `nt_create_process`.
+pub const NT_CREATE_PROCESS: u64 = 11;
+/// `(process_handle)` -> 0 (WAIT_OBJECT_0) once the process exited.
+pub const NT_WAIT: u64 = 12;
+/// `(process_handle, out_u32_ptr)`; writes the exit code or STILL_ACTIVE (259).
+pub const NT_QUERY_EXIT_CODE: u64 = 13;
 #[cfg(feature = "ktest")]
 pub const SYS_SUM6: u64 = 100;
 pub const STATUS_SUCCESS: u64 = 0;
@@ -30,6 +36,10 @@ pub const STATUS_INVALID_PARAMETER: u64 = 0xC000_000D;
 pub const STATUS_OBJECT_NAME_NOT_FOUND: u64 = 0xC000_0034;
 pub const STATUS_ACCESS_DENIED: u64 = 0xC000_0022;
 pub const STATUS_NAME_TOO_LONG: u64 = 0xC000_0106;
+pub const STATUS_UNSUCCESSFUL: u64 = 0xC000_0001;
+pub const STATUS_INSUFFICIENT_RESOURCES: u64 = 0xC000_009A;
+/// Wait result for a signaled object (WAIT_OBJECT_0).
+pub const WAIT_OBJECT_0: u64 = 0;
 
 #[cfg(feature = "ktest")]
 pub static LAST_WRITE_LEN: AtomicU64 = AtomicU64::new(0);
@@ -250,6 +260,104 @@ fn nt_open_file(out: u64, path_ptr: u64, path_len: u64, access: u64) -> u64 {
     STATUS_SUCCESS
 }
 
+/// Decodes `path` (UTF-16LE bytes, bounded) and starts the initrd `.exe` it names as
+/// a new process (own address space, console handles 4/8 inherited). Returns the
+/// exit state shared with the child. Pure core of `nt_create_process`: touches no
+/// user memory and no handle table, and holds no lock across the spawn.
+pub fn create_process(path: &[u8]) -> Result<alloc::sync::Arc<crate::object::ProcExit>, u64> {
+    if path.len() as u64 > MAX_PATH_BYTES {
+        return Err(STATUS_NAME_TOO_LONG);
+    }
+    if !path.len().is_multiple_of(2) {
+        return Err(STATUS_INVALID_PARAMETER);
+    }
+    let units = path
+        .chunks_exact(2)
+        .map(|c| u16::from_le_bytes([c[0], c[1]]));
+    let mut s = alloc::string::String::with_capacity(path.len() / 2);
+    for r in char::decode_utf16(units) {
+        match r {
+            Ok(c) if c.is_ascii() => s.push(c),
+            _ => return Err(STATUS_OBJECT_NAME_NOT_FOUND),
+        }
+    }
+    let image = crate::fs::lookup(&s).ok_or(STATUS_OBJECT_NAME_NOT_FOUND)?;
+    let exit = crate::object::ProcExit::new();
+    match crate::process::spawn_exe_image_with_k32_exit(image.to_vec(), Some(exit.clone())) {
+        Ok(()) => Ok(exit),
+        Err(crate::process::SpawnError::NoDlls) => Err(STATUS_UNSUCCESSFUL),
+        Err(crate::process::SpawnError::NoThreads) => Err(STATUS_INSUFFICIENT_RESOURCES),
+    }
+}
+
+/// Blocks (yielding, no lock held) until `exit` is done.
+pub fn wait_for_exit(exit: &crate::object::ProcExit) {
+    while !exit.is_done() {
+        crate::sched::yield_now();
+    }
+}
+
+/// NT_CREATE_PROCESS (nr 11): a0 = `const WCHAR* path` (UTF-16LE, not NUL-terminated),
+/// a1 = path length in BYTES (<= 520), a2 = `HANDLE* out_process` (written on success
+/// only). Status: SUCCESS; OBJECT_NAME_NOT_FOUND; NAME_TOO_LONG; INVALID_PARAMETER;
+/// ACCESS_VIOLATION; INSUFFICIENT_RESOURCES; INVALID_HANDLE for a kernel caller.
+fn nt_create_process(path_ptr: u64, path_len: u64, out: u64) -> u64 {
+    let path_len = path_len as u32 as u64;
+    if path_len > MAX_PATH_BYTES {
+        return STATUS_NAME_TOO_LONG;
+    }
+    if !crate::sched::current_is_user() {
+        return STATUS_INVALID_HANDLE;
+    }
+    let Some(path) = crate::usercopy::copy_from_user(path_ptr, path_len) else {
+        return STATUS_ACCESS_VIOLATION;
+    };
+    // Validate the out pointer BEFORE spawning anything.
+    if !crate::usercopy::copy_to_user(out, &[0u8; 8]) {
+        return STATUS_ACCESS_VIOLATION;
+    }
+    let exit = match create_process(&path) {
+        Ok(e) => e,
+        Err(st) => return st,
+    };
+    let Some(handle) =
+        crate::sched::with_current_handles(|t| t.insert(crate::object::Object::Process { exit }))
+    else {
+        return STATUS_INVALID_HANDLE;
+    };
+    if !crate::usercopy::copy_to_user(out, &handle.to_le_bytes()) {
+        let _ = crate::sched::with_current_handles(|t| t.close(handle)); // child keeps running
+        return STATUS_ACCESS_VIOLATION;
+    }
+    STATUS_SUCCESS
+}
+
+/// NT_WAIT (nr 12): a0 = process handle. Resolves the handle to its `Arc`, drops the
+/// handle-table lock, THEN polls/yields: no lock is held while blocked.
+fn nt_wait(handle: u64) -> u64 {
+    let exit = crate::sched::with_current_handles(|t| t.process_exit(handle)).flatten();
+    match exit {
+        Some(e) => {
+            wait_for_exit(&e);
+            WAIT_OBJECT_0
+        }
+        None => STATUS_INVALID_HANDLE,
+    }
+}
+
+/// NT_QUERY_EXIT_CODE (nr 13): a0 = process handle, a1 = `u32* out` (exit code, or
+/// STILL_ACTIVE=259 while running).
+fn nt_query_exit_code(handle: u64, out: u64) -> u64 {
+    let exit = crate::sched::with_current_handles(|t| t.process_exit(handle)).flatten();
+    match exit {
+        Some(e) if crate::usercopy::copy_to_user(out, &e.exit_code().to_le_bytes()) => {
+            STATUS_SUCCESS
+        }
+        Some(_) => STATUS_ACCESS_VIOLATION,
+        None => STATUS_INVALID_HANDLE,
+    }
+}
+
 /// NT_SET_FILE_POINTER (nr 9): a0 = handle, a1 = signed 64-bit distance,
 /// a2 = method (0 BEGIN, 1 CURRENT, 2 END), a3 = `u64* out_new_offset`.
 /// Negative result -> INVALID_PARAMETER; past-EOF clamps to the size.
@@ -434,6 +542,9 @@ pub extern "C" fn dispatch(nr: u64, a0: u64, a1: u64, a2: u64, _a3: u64, _user_r
         NT_OPEN_FILE => nt_open_file(a0, a1, a2, _a3),
         NT_SET_FILE_POINTER => nt_set_file_pointer(a0, a1, a2, _a3),
         NT_QUERY_FILE_SIZE => nt_query_file_size(a0, a1),
+        NT_CREATE_PROCESS => nt_create_process(a0, a1, a2),
+        NT_WAIT => nt_wait(a0),
+        NT_QUERY_EXIT_CODE => nt_query_exit_code(a0, a1),
         NT_ALLOCATE_VIRTUAL_MEMORY => {
             // NtAllocateVirtualMemory(Process, *Base, ZeroBits, *Size, AllocType,
             // Protect): ZeroBits (a2) is ignored; the last two are on the stack.
@@ -453,7 +564,7 @@ pub extern "C" fn dispatch(nr: u64, a0: u64, a1: u64, a2: u64, _a3: u64, _user_r
             #[cfg(any(feature = "ktest", feature = "conformance"))]
             LAST_TERMINATE_STATUS.store(a1 as u32 as u64, Ordering::SeqCst);
             if crate::sched::current_is_user() {
-                crate::sched::exit_current();
+                crate::sched::exit_current_with(a1 as u32);
             }
             #[cfg(target_os = "none")]
             unsafe {

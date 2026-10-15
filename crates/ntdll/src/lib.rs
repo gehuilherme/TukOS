@@ -174,6 +174,26 @@ pub extern "system" fn NtTukosQueryFileSize() {
     core::arch::naked_asm!("mov r10, rcx", "mov eax, 10", "syscall", "ret");
 }
 
+// Process extensions (NT_CREATE_PROCESS = 11, NT_WAIT = 12, NT_QUERY_EXIT_CODE = 13);
+// arg layouts documented in kernel/src/syscall.rs.
+#[unsafe(naked)]
+#[unsafe(no_mangle)]
+pub extern "system" fn NtTukosCreateProcess() {
+    core::arch::naked_asm!("mov r10, rcx", "mov eax, 11", "syscall", "ret");
+}
+
+#[unsafe(naked)]
+#[unsafe(no_mangle)]
+pub extern "system" fn NtTukosWait() {
+    core::arch::naked_asm!("mov r10, rcx", "mov eax, 12", "syscall", "ret");
+}
+
+#[unsafe(naked)]
+#[unsafe(no_mangle)]
+pub extern "system" fn NtTukosQueryExitCode() {
+    core::arch::naked_asm!("mov r10, rcx", "mov eax, 13", "syscall", "ret");
+}
+
 /// `RtlExitUserProcess(code)`: a real function (NOT a bare forwarder to the
 /// 2-arg `NtTerminateProcess`) that terminates the current process with `code`.
 #[unsafe(no_mangle)]

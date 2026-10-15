@@ -3,7 +3,9 @@
 
 extern crate alloc;
 
+use alloc::sync::Arc;
 use alloc::vec::Vec;
+use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 /// Handle every user process receives for the console.
 pub const CONSOLE_HANDLE: u64 = 4;
@@ -11,6 +13,55 @@ pub const CONSOLE_HANDLE: u64 = 4;
 /// Handle every user process receives for console (keyboard) input; the second
 /// slot of the table, so its value is 8.
 pub const CONSOLE_INPUT_HANDLE: u64 = 8;
+
+/// `GetExitCodeProcess` value of a process that has not exited yet.
+pub const STILL_ACTIVE: u32 = 259;
+
+/// Exit state shared (via `Arc`) between a child's scheduler thread and the
+/// parent's `Object::Process` handle. It owns NO image/frames, so it outlives
+/// the child's address space (reaped independently) and holding it keeps
+/// nothing alive. `status` is stored before `done` (Release); readers load
+/// `done` (Acquire) before `status`.
+#[derive(Debug)]
+pub struct ProcExit {
+    done: AtomicBool,
+    status: AtomicU32,
+}
+
+impl ProcExit {
+    pub fn new() -> Arc<Self> {
+        Arc::new(Self {
+            done: AtomicBool::new(false),
+            status: AtomicU32::new(0),
+        })
+    }
+
+    /// Records the exit status and signals completion (status first).
+    pub fn finish(&self, status: u32) {
+        self.status.store(status, Ordering::Relaxed);
+        self.done.store(true, Ordering::Release);
+    }
+
+    pub fn is_done(&self) -> bool {
+        self.done.load(Ordering::Acquire)
+    }
+
+    /// The exit status, or `STILL_ACTIVE` while the process runs.
+    pub fn exit_code(&self) -> u32 {
+        if self.is_done() {
+            self.status.load(Ordering::Relaxed)
+        } else {
+            STILL_ACTIVE
+        }
+    }
+}
+
+// Identity comparison: two handles are equal only if they name the same process.
+impl PartialEq for ProcExit {
+    fn eq(&self, other: &Self) -> bool {
+        core::ptr::eq(self, other)
+    }
+}
 
 #[derive(Clone, PartialEq, Debug)]
 pub enum Object {
@@ -20,6 +71,10 @@ pub enum Object {
     File {
         content: &'static [u8],
         offset: usize,
+    },
+    /// A child process: only its shared exit state, never its memory.
+    Process {
+        exit: Arc<ProcExit>,
     },
 }
 
@@ -58,6 +113,14 @@ impl HandleTable {
 
     pub fn get(&self, handle: u64) -> Option<&Object> {
         self.slots[self.index(handle)?].as_ref()
+    }
+
+    /// The shared exit state if `handle` is a process handle.
+    pub fn process_exit(&self, handle: u64) -> Option<Arc<ProcExit>> {
+        match self.get(handle)? {
+            Object::Process { exit } => Some(exit.clone()),
+            _ => None,
+        }
     }
 
     /// Closes `handle`; false if it was not a valid open handle.

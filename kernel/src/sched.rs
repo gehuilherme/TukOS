@@ -5,8 +5,9 @@
 extern crate alloc;
 
 use crate::mem::space::AddressSpace;
-use crate::object::{CONSOLE_HANDLE, HandleTable, Object};
+use crate::object::{CONSOLE_HANDLE, HandleTable, Object, ProcExit};
 use alloc::boxed::Box;
+use alloc::sync::Arc;
 use alloc::vec::Vec;
 use arch_x86_64::interrupts::IrqMutex;
 use core::sync::atomic::{AtomicU64, Ordering};
@@ -38,6 +39,9 @@ struct Thread {
     teb_va: u64,
     /// Handle table of a user process; None for kernel threads.
     handle_table: Option<HandleTable>,
+    /// Exit state shared with the parent's `Object::Process`; filled in (and
+    /// taken) by `exit_current_with` BEFORE the thread is reaped.
+    proc_exit: Option<Arc<ProcExit>>,
     /// x87/SSE state, swapped with fxsave/fxrstor on every context switch.
     fpu: Box<arch_x86_64::cpu::FxArea>,
 }
@@ -66,6 +70,7 @@ pub fn init() {
         space: None,
         teb_va: 0,
         handle_table: None,
+        proc_exit: None,
         fpu: Box::default(),
     };
     let mut threads = Vec::with_capacity(MAX_THREADS);
@@ -124,6 +129,7 @@ pub fn spawn(entry: fn()) -> usize {
         space: None,
         teb_va: 0,
         handle_table: None,
+        proc_exit: None,
         fpu: Box::default(),
     });
     s.threads.len() - 1
@@ -135,9 +141,32 @@ pub fn spawn_user(
     space: AddressSpace,
     entry: u64,
     user_stack_top: u64,
-    mut kstack: Box<[u8]>,
+    kstack: Box<[u8]>,
     teb_va: u64,
 ) -> usize {
+    spawn_user_with_exit(space, entry, user_stack_top, kstack, teb_va, None)
+        .expect("sched: limite de threads atingido")
+}
+
+/// True if the thread table has room for one more thread.
+pub fn has_thread_capacity() -> bool {
+    SCHED
+        .lock()
+        .as_ref()
+        .is_some_and(|s| s.threads.len() < MAX_THREADS)
+}
+
+/// Like `spawn_user`, but the new thread also carries `proc_exit` (installed
+/// atomically with the thread, so an immediate exit is never missed). Returns
+/// `None` (dropping `space` and `kstack`) when the thread table is full.
+pub fn spawn_user_with_exit(
+    space: AddressSpace,
+    entry: u64,
+    user_stack_top: u64,
+    mut kstack: Box<[u8]>,
+    teb_va: u64,
+    proc_exit: Option<Arc<ProcExit>>,
+) -> Option<usize> {
     let space_root = space.root();
     let top = (kstack.as_mut_ptr() as u64 + kstack.len() as u64) & !0xF;
     // Low -> high: 6 callee-saved zeros, tukos_user_entry, then the iretq frame
@@ -163,10 +192,10 @@ pub fn spawn_user(
     debug_assert_eq!(console_in, crate::object::CONSOLE_INPUT_HANDLE);
     let mut guard = SCHED.lock();
     let s = guard.as_mut().expect("scheduler nao iniciado");
-    assert!(
-        s.threads.len() < MAX_THREADS,
-        "sched: limite de {MAX_THREADS} threads atingido"
-    );
+    if s.threads.len() >= MAX_THREADS {
+        drop(guard); // AddressSpace::drop takes the frames lock
+        return None;
+    }
     s.threads.push(Thread {
         rsp,
         entry: None,
@@ -177,9 +206,10 @@ pub fn spawn_user(
         space: Some(space),
         teb_va,
         handle_table: Some(handles),
+        proc_exit,
         fpu: Box::default(),
     });
-    s.threads.len() - 1
+    Some(s.threads.len() - 1)
 }
 
 /// Switches to the next thread. The scheduler guard is dropped before the
@@ -275,11 +305,21 @@ fn reap_pending() {
 /// Terminates the current (user) thread: marks it Exited and switches away; its
 /// space and kernel stack are released by the reaper on the next thread's stack.
 pub fn exit_current() -> ! {
+    exit_current_with(0)
+}
+
+/// `exit_current` that records `status` for a waiting parent. The status is
+/// published (`ProcExit::finish`) while the thread and its space are still
+/// intact, strictly before the switch-away that lets the reaper free them.
+pub fn exit_current_with(status: u32) -> ! {
     arch_x86_64::interrupts::disable();
     {
         let mut guard = SCHED.lock();
         let s = guard.as_mut().expect("scheduler nao iniciado");
         let cur = s.current;
+        if let Some(pe) = s.threads[cur].proc_exit.take() {
+            pe.finish(status);
+        }
         s.threads[cur].state = ThreadState::Exited;
         s.reap = Some(cur);
     }

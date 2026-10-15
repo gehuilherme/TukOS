@@ -744,9 +744,31 @@ pub fn spawn_exe_image_with_ntdll(exe: alloc::vec::Vec<u8>) {
 /// user thread that begins at ntdll's `LdrInitializeThunk`. Does nothing when either
 /// DLL is not embedded.
 pub fn spawn_exe_image_with_k32(exe: alloc::vec::Vec<u8>) {
+    let _ = spawn_exe_image_with_k32_exit(exe, None);
+}
+
+/// Why `spawn_exe_image_with_k32_exit` did not start a process.
+#[derive(Debug, PartialEq)]
+pub enum SpawnError {
+    /// kernel32/ntdll are not embedded in this kernel build.
+    NoDlls,
+    /// The scheduler's thread table is full.
+    NoThreads,
+}
+
+/// `spawn_exe_image_with_k32` that also attaches `proc_exit` to the new thread (the
+/// child records its exit status there, see `sched::exit_current_with`). The child
+/// gets its own address space and handle table; only the console handles 4/8 exist.
+pub fn spawn_exe_image_with_k32_exit(
+    exe: alloc::vec::Vec<u8>,
+    proc_exit: Option<alloc::sync::Arc<crate::object::ProcExit>>,
+) -> Result<(), SpawnError> {
     let nt = crate::ntdll_image::NTDLL_BYTES;
     if nt.is_empty() || crate::kernel32_image::KERNEL32_BYTES.is_empty() {
-        return;
+        return Err(SpawnError::NoDlls);
+    }
+    if !crate::sched::has_thread_capacity() {
+        return Err(SpawnError::NoThreads);
     }
     let es = build_exe_k32_space_with(exe);
     let rva = pe::PeFile::parse(nt)
@@ -754,13 +776,26 @@ pub fn spawn_exe_image_with_k32(exe: alloc::vec::Vec<u8>) {
         .and_then(|p| p.export_rva_by_name("LdrInitializeThunk"))
         .expect("ntdll sem LdrInitializeThunk");
     let kstack = alloc::vec![0u8; KSTACK_SIZE].into_boxed_slice();
-    crate::sched::spawn_user(
+    crate::sched::spawn_user_with_exit(
         es.space,
         NTDLL_LOAD_BASE + u64::from(rva),
         es.stack_va + 4096,
         kstack,
         es.teb_va,
-    );
+        proc_exit,
+    )
+    .map(|_| ())
+    .ok_or(SpawnError::NoThreads)
+}
+
+/// Test `.exe` that dereferences unmapped VA 1 right at its entry (Ring-3 #PF).
+pub fn build_exe_faults() -> alloc::vec::Vec<u8> {
+    build_import_exe("kernel32.dll", &["ExitProcess"], None, None, |_, _| {
+        alloc::vec![
+            0x48, 0x8B, 0x04, 0x25, 0x01, 0x00, 0x00, 0x00, // mov rax, [0x1]
+            0x0F, 0x0B, // ud2 (never reached)
+        ]
+    })
 }
 
 const TEXT_RVA: u32 = 0x1000;

@@ -100,6 +100,9 @@ const TESTS: &[(&str, TestFn)] = &[
         exe_calls_forwarded_kernel32_export,
     ),
     ("exit_code_is_reported", exit_code_is_reported),
+    ("create_wait_exit", create_wait_exit),
+    ("child_fault_reports_status", child_fault_reports_status),
+    ("create_process_errors", create_process_errors),
     (
         "loader_rejects_missing_dependency",
         loader_rejects_missing_dependency,
@@ -1736,6 +1739,116 @@ fn exit_code_is_reported() -> Result<(), &'static str> {
         }
     }
     Err("exe que chama ExitProcess(0x2A) nao terminou/recolheu")
+}
+
+/// UTF-16LE bytes of `s` (as a user would pass a path to NT_CREATE_PROCESS).
+fn utf16le(s: &str) -> alloc::vec::Vec<u8> {
+    s.encode_utf16().flat_map(u16::to_le_bytes).collect()
+}
+
+/// Creates `path` as a child of a stand-in parent table, waits, and checks the
+/// process handle + exit code + frame reclamation + Close. Returns the exit code.
+fn run_child(path: &str) -> Result<u32, &'static str> {
+    use crate::object::{HandleTable, Object, STILL_ACTIVE};
+    let before = crate::mem::frames::free_frame_count();
+    let mut parent = HandleTable::new();
+    let exit =
+        crate::syscall::create_process(&utf16le(path)).map_err(|_| "create_process falhou")?;
+    let h = parent.insert(Object::Process { exit });
+    let exit = parent
+        .process_exit(h)
+        .ok_or("handle de processo nao resolve")?;
+    // The same Arc lives in the handle and in the child's Thread (until it exits).
+    if h == 0 || parent.process_exit(h + 4).is_some() {
+        return Err("handle invalido resolveu");
+    }
+    crate::syscall::wait_for_exit(&exit);
+    let code = exit.exit_code();
+    if code == STILL_ACTIVE {
+        return Err("exit code ainda STILL_ACTIVE apos o wait");
+    }
+    drop(exit);
+    if !parent.close(h) || parent.close(h) {
+        return Err("close do handle de processo (ou double-close) incorreto");
+    }
+    // The wait returned on the parent's stack AFTER the child was reaped.
+    if crate::mem::frames::free_frame_count() != before {
+        return Err("frames vazaram apos create+wait+close");
+    }
+    Ok(code)
+}
+
+fn create_wait_exit() -> Result<(), &'static str> {
+    if !have_both_dlls() {
+        return Ok(());
+    }
+    crate::fs::register_test_file(
+        "test/exit42.exe",
+        crate::process::build_exe_exit_code_2a().leak(),
+    );
+    let code = run_child(r"C:\test\Exit42.exe")?;
+    if code != 0x2A {
+        return Err("ExitProcess(0x2A) do filho nao virou exit code 0x2A");
+    }
+    // Run it twice: nothing is left over from the first child (no leak, no reuse bug).
+    if run_child("c:/test/exit42.exe")? != 0x2A {
+        return Err("segundo filho: exit code errado");
+    }
+    Ok(())
+}
+
+fn child_fault_reports_status() -> Result<(), &'static str> {
+    if !have_both_dlls() {
+        return Ok(());
+    }
+    crate::fs::register_test_file("test/fault.exe", crate::process::build_exe_faults().leak());
+    let code = run_child(r"C:\test\fault.exe")?;
+    // A faulted child reports an exception status, not 0 and not STILL_ACTIVE.
+    if code != 0xC000_0005 {
+        return Err("filho com #PF nao reportou STATUS_ACCESS_VIOLATION");
+    }
+    // The kernel and a following (healthy) child still work.
+    crate::fs::register_test_file(
+        "test/exit42.exe",
+        crate::process::build_exe_exit_code_2a().leak(),
+    );
+    if run_child("test/exit42.exe")? != 0x2A {
+        return Err("kernel nao se recuperou do filho com fault");
+    }
+    Ok(())
+}
+
+fn create_process_errors() -> Result<(), &'static str> {
+    use crate::syscall::{
+        STATUS_INVALID_PARAMETER, STATUS_NAME_TOO_LONG, STATUS_OBJECT_NAME_NOT_FOUND,
+        create_process,
+    };
+    if !have_both_dlls() {
+        return Ok(());
+    }
+    let before = crate::mem::frames::free_frame_count();
+    if create_process(&utf16le("nope.exe")).err() != Some(STATUS_OBJECT_NAME_NOT_FOUND) {
+        return Err("exe ausente deveria dar OBJECT_NAME_NOT_FOUND");
+    }
+    if create_process(&utf16le(r"..\x.exe")).err() != Some(STATUS_OBJECT_NAME_NOT_FOUND) {
+        return Err("traversal deveria falhar");
+    }
+    if create_process(&[0x41]).err() != Some(STATUS_INVALID_PARAMETER) {
+        return Err("comprimento impar deveria ser INVALID_PARAMETER");
+    }
+    if create_process(&[0x41; 600]).err() != Some(STATUS_NAME_TOO_LONG) {
+        return Err("caminho longo deveria ser NAME_TOO_LONG");
+    }
+    // Wait/query on non-process handles resolve to nothing.
+    let mut t = crate::object::HandleTable::new();
+    let con = t.insert(crate::object::Object::Console);
+    if t.process_exit(con).is_some() || t.process_exit(0x1000).is_some() {
+        return Err("handle que nao e de processo resolveu como processo");
+    }
+    if crate::mem::frames::free_frame_count() != before {
+        return Err("erro de create_process vazou frames");
+    }
+    Ok(())
 }
 
 fn loader_rejects_missing_dependency() -> Result<(), &'static str> {

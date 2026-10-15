@@ -55,8 +55,29 @@ pub fn normalize(path: &str) -> Option<String> {
     (!out.is_empty()).then_some(out)
 }
 
+/// Extra files registered at runtime by kernel self-tests (never in a real build).
+#[cfg(feature = "ktest")]
+static TEST_FILES: arch_x86_64::interrupts::IrqMutex<alloc::vec::Vec<(String, &'static [u8])>> =
+    arch_x86_64::interrupts::IrqMutex::new(alloc::vec::Vec::new());
+
+/// ktest only: makes `bytes` resolvable as `key` (already normalized form).
+#[cfg(feature = "ktest")]
+pub fn register_test_file(key: &str, bytes: &'static [u8]) {
+    let mut g = TEST_FILES.lock();
+    if !g.iter().any(|(k, _)| k == key) {
+        g.push((String::from(key), bytes));
+    }
+}
+
 /// Looks `path` up in the initrd.
 pub fn lookup(path: &str) -> Option<&'static [u8]> {
     let key = normalize(path)?;
-    FILES.iter().find(|(k, _)| *k == key).map(|(_, v)| *v)
+    if let Some((_, v)) = FILES.iter().find(|(k, _)| *k == key) {
+        return Some(*v);
+    }
+    #[cfg(feature = "ktest")]
+    if let Some((_, v)) = TEST_FILES.lock().iter().find(|(k, _)| *k == key) {
+        return Some(*v);
+    }
+    None
 }
