@@ -1,11 +1,11 @@
-/* Survey de imports: programa /MT que le um arquivo fixo e imprime. */
+/* Programa /MT: le "cat.txt" (relativo, binario) e imprime em stdout. */
 #include <stdio.h>
 
 int main(void)
 {
     char buf[256];
     size_t n;
-    FILE *f = fopen("C:\\cat.txt", "rb");
+    FILE *f = fopen("cat.txt", "rb");
     if (!f) {
         puts("fileio: open failed");
         return 1;

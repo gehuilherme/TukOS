@@ -96,7 +96,11 @@ fn build_exe(
 fn build_crt_exe(vcvars: &Path, root: &Path, name: &str) -> crate::Result<PathBuf> {
     let outdir = root.join("target").join("conformance").join("crt");
     std::fs::create_dir_all(&outdir).map_err(|e| e.to_string())?;
-    let srcdir = if name == "echo" { "echo" } else { "crt" };
+    let srcdir = match name {
+        "echo" => "echo",
+        "fileio" => "fileio",
+        _ => "crt",
+    };
     let src = root
         .join("conformance")
         .join(srcdir)
@@ -121,9 +125,22 @@ fn build_crt_exe(vcvars: &Path, root: &Path, name: &str) -> crate::Result<PathBu
 }
 
 /// One case: run `exe` on the real Windows, boot the kernel built with `features`, compare.
-fn run_case(label: &str, exe: &Path, features: &[&str], stdin: &[u8]) -> crate::Result<()> {
+fn run_case(
+    label: &str,
+    exe: &Path,
+    features: &[&str],
+    stdin: &[u8],
+    sidecar: Option<(&str, &[u8])>,
+) -> crate::Result<()> {
+    // Optional file the program reads from its working directory (the TukOS side
+    // gets the same bytes from the embedded initrd). The exe's directory is the CWD.
+    let cwd = exe.parent().ok_or("exe sem diretorio")?;
+    if let Some((name, bytes)) = sidecar {
+        std::fs::write(cwd.join(name), bytes).map_err(|e| e.to_string())?;
+    }
     // Reference: the same binary on the real Windows (binds to the real DLLs).
     let mut child = Command::new(exe)
+        .current_dir(cwd)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit())
@@ -210,11 +227,22 @@ pub fn run_conformance() -> crate::Result<()> {
     let heap = build_exe(&vcvars, &root, "heap", "heap", &k32_lib)?;
     let crt = build_crt_exe(&vcvars, &root, "hello")?;
     let echo = build_crt_exe(&vcvars, &root, "echo")?;
-    run_case("ntdll", &hello, &["conformance"], b"")?;
-    run_case("kernel32", &hello32, &["conformance32"], b"")?;
-    run_case("heap", &heap, &["conformance_heap"], b"")?;
-    run_case("crt", &crt, &["conformance_crt"], b"")?;
-    run_case("echo", &echo, &["conformance_echo"], b"teste\n")?;
+    let fileio = build_crt_exe(&vcvars, &root, "fileio")?;
+    run_case("ntdll", &hello, &["conformance"], b"", None)?;
+    run_case("kernel32", &hello32, &["conformance32"], b"", None)?;
+    run_case("heap", &heap, &["conformance_heap"], b"", None)?;
+    run_case("crt", &crt, &["conformance_crt"], b"", None)?;
+    run_case("echo", &echo, &["conformance_echo"], b"teste\n", None)?;
+    // Same bytes as the kernel's embedded initrd `cat.txt` (kernel/src/fs.rs).
+    let cat = std::fs::read(root.join("conformance").join("fileio").join("cat.txt"))
+        .map_err(|e| format!("cat.txt: {e}"))?;
+    run_case(
+        "fileio",
+        &fileio,
+        &["conformance_fileio"],
+        b"",
+        Some(("cat.txt", &cat)),
+    )?;
     Ok(())
 }
 

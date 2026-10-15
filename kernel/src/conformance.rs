@@ -16,11 +16,18 @@ static CONFORMANCE_EXE: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/confor
 ))]
 static CONFORMANCE_EXE: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/conformance32.exe"));
 /// With `conformance_crt` the program is the real `/MT` CRT hello.exe (exe+kernel32+ntdll).
-#[cfg(all(feature = "conformance_crt", not(feature = "conformance_echo")))]
+#[cfg(all(
+    feature = "conformance_crt",
+    not(feature = "conformance_echo"),
+    not(feature = "conformance_fileio")
+))]
 static CONFORMANCE_EXE: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/crt_hello.exe"));
 /// With `conformance_echo` the program is the `/MT` echo.exe; stdin is pre-fed "teste\n".
 #[cfg(feature = "conformance_echo")]
 static CONFORMANCE_EXE: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/echo.exe"));
+/// With `conformance_fileio` the program is the `/MT` fileio.exe (fopen/fread of initrd `cat.txt`).
+#[cfg(feature = "conformance_fileio")]
+static CONFORMANCE_EXE: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/fileio.exe"));
 /// With `conformance_heap` the program is heap.exe (HeapAlloc/HeapFree, exits 7).
 #[cfg(all(feature = "conformance_heap", not(feature = "conformance_crt")))]
 static CONFORMANCE_EXE: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/conformance_heap.exe"));
