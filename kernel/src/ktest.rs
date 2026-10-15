@@ -147,6 +147,14 @@ const TESTS: &[(&str, TestFn)] = &[
         "stack_args_rejected_when_user_rsp_bad",
         stack_args_rejected_when_user_rsp_bad,
     ),
+    ("file_open_read_eof", file_open_read_eof),
+    ("file_seek_and_size", file_seek_and_size),
+    ("file_open_rejects_bad_paths", file_open_rejects_bad_paths),
+    ("file_path_normalization", file_path_normalization),
+    (
+        "file_syscalls_reject_kernel_thread",
+        file_syscalls_reject_kernel_thread,
+    ),
     (
         "handle_table_bounds_and_close",
         handle_table_bounds_and_close,
@@ -508,6 +516,206 @@ fn import_resolve_unknown_function() -> Result<(), &'static str> {
         Err(LoadError::UnresolvedImport) => Ok(()),
         _ => Err("funcao inexistente deveria dar UnresolvedImport"),
     }
+}
+
+const CAT: &[u8] = b"arquivo de teste do TukOS\n";
+
+fn utf16(s: &str) -> alloc::vec::Vec<u8> {
+    s.encode_utf16().flat_map(u16::to_le_bytes).collect()
+}
+
+fn read_all(t: &mut crate::object::HandleTable, h: u64, want: usize) -> alloc::vec::Vec<u8> {
+    let data = t.file_peek(h, want).unwrap_or(&[]);
+    t.file_commit(h, data.len());
+    data.to_vec()
+}
+
+/// A table laid out like a real process's: console = 4, console input = 8.
+fn process_like_table() -> crate::object::HandleTable {
+    use crate::object::{HandleTable, Object};
+    let mut t = HandleTable::new();
+    assert_eq!(t.insert(Object::Console), crate::object::CONSOLE_HANDLE);
+    assert_eq!(
+        t.insert(Object::ConsoleInput),
+        crate::object::CONSOLE_INPUT_HANDLE
+    );
+    t
+}
+
+fn file_open_read_eof() -> Result<(), &'static str> {
+    let mut t = process_like_table();
+    let h1 = crate::syscall::open_file_in(&mut t, &utf16("C:\\cat.txt"), 0x8000_0000)
+        .map_err(|_| "open C:\\cat.txt falhou")?;
+    if h1 == crate::object::CONSOLE_HANDLE || h1 == crate::object::CONSOLE_INPUT_HANDLE {
+        return Err("handle colidiu com console");
+    }
+    let h2 = crate::syscall::open_file_in(&mut t, &utf16("c:/CAT.TXT"), 0x8000_0000)
+        .map_err(|_| "segundo open falhou")?;
+    if h1 == h2 {
+        return Err("dois opens devolveram o mesmo handle");
+    }
+    // Partial read on h1 must not move h2 (per-handle offset).
+    if read_all(&mut t, h1, 7) != CAT[..7] {
+        return Err("leitura parcial errada");
+    }
+    if read_all(&mut t, h2, 4096) != CAT {
+        return Err("leitura total errada (offset nao e por handle?)");
+    }
+    if !read_all(&mut t, h2, 4096).is_empty() {
+        return Err("segunda leitura deveria dar EOF(0)");
+    }
+    if read_all(&mut t, h1, 4096) != CAT[7..] {
+        return Err("resto da leitura parcial errado");
+    }
+    if !t.close(h1) || !t.close(h2) {
+        return Err("close de arquivo falhou");
+    }
+    if t.get(h1).is_some() || t.file_peek(h1, 1).is_some() {
+        return Err("handle de arquivo fechado ainda resolve");
+    }
+    // Slot reuse: no leak.
+    let h3 = crate::syscall::open_file_in(&mut t, &utf16("\\??\\C:\\cat.txt"), 0x8000_0000)
+        .map_err(|_| "open NT-path falhou")?;
+    if h3 != h1 {
+        return Err("slot do handle fechado nao foi reutilizado");
+    }
+    Ok(())
+}
+
+fn file_seek_and_size() -> Result<(), &'static str> {
+    let mut t = process_like_table();
+    let h = crate::syscall::open_file_in(&mut t, &utf16("C:\\cat.txt"), 0x8000_0000)
+        .map_err(|_| "open falhou")?;
+    if t.file_size(h) != Some(CAT.len() as u64) {
+        return Err("tamanho errado");
+    }
+    let _ = read_all(&mut t, h, 4096);
+    if t.file_seek(h, 0, 0) != Ok(0) {
+        return Err("seek BEGIN falhou");
+    }
+    if read_all(&mut t, h, 4096) != CAT {
+        return Err("re-leitura apos seek errada");
+    }
+    if t.file_seek(h, -5, 2) != Ok(CAT.len() as u64 - 5) {
+        return Err("seek END-5 errado");
+    }
+    if read_all(&mut t, h, 4096) != CAT[CAT.len() - 5..] {
+        return Err("leitura apos seek END errada");
+    }
+    if t.file_seek(h, 3, 0) != Ok(3) || t.file_seek(h, 2, 1) != Ok(5) {
+        return Err("seek CURRENT errado");
+    }
+    if t.file_seek(h, 1000, 0) != Ok(CAT.len() as u64) {
+        return Err("seek alem do fim deveria fixar em len");
+    }
+    if !read_all(&mut t, h, 10).is_empty() {
+        return Err("leitura apos o fim deveria ser 0");
+    }
+    if t.file_seek(h, -1, 0).is_ok() || t.file_seek(h, i64::MIN, 1).is_ok() {
+        return Err("seek negativo deveria falhar");
+    }
+    if t.file_seek(h, 0, 7).is_ok() {
+        return Err("metodo invalido deveria falhar");
+    }
+    if t.file_seek(h, i64::MAX, 1).is_err() || t.file_seek(h, i64::MAX, 2).is_err() {
+        return Err("overflow deveria fixar, nao falhar/panicar");
+    }
+    if t.file_seek(crate::object::CONSOLE_HANDLE, 0, 0).is_ok() || t.file_size(8).is_some() {
+        return Err("seek/size em console deveria falhar");
+    }
+    Ok(())
+}
+
+fn file_open_rejects_bad_paths() -> Result<(), &'static str> {
+    use crate::syscall::open_file_in;
+    const NF: u64 = 0xC000_0034;
+    let mut t = process_like_table();
+    let ro = 0x8000_0000;
+    if open_file_in(&mut t, &utf16("C:\\nao_existe.txt"), ro) != Err(NF) {
+        return Err("ausente deveria dar OBJECT_NAME_NOT_FOUND");
+    }
+    for bad in [
+        "C:\\..\\cat.txt",
+        "..\\cat.txt",
+        "C:\\x\\..\\cat.txt",
+        "C:/../cat.txt",
+    ] {
+        if open_file_in(&mut t, &utf16(bad), ro) != Err(NF) {
+            return Err("travessia .. deveria ser rejeitada");
+        }
+    }
+    if open_file_in(&mut t, &utf16("D:\\cat.txt"), ro) != Err(NF) {
+        return Err("outro drive deveria dar not found");
+    }
+    if open_file_in(&mut t, &utf16("C:\\caf\u{e9}.txt"), ro) != Err(NF) {
+        return Err("nao-ASCII deveria dar not found");
+    }
+    if open_file_in(&mut t, &[0x00, 0xD8, 0x41, 0x00], ro) != Err(NF) {
+        return Err("surrogate solto deveria dar not found");
+    }
+    if open_file_in(&mut t, &utf16("C:\\cat.txt\0"), ro) != Err(NF) {
+        return Err("NUL embutido deveria dar not found");
+    }
+    if open_file_in(&mut t, b"c", ro) != Err(0xC000_000D) {
+        return Err("tamanho impar deveria dar INVALID_PARAMETER");
+    }
+    let long = utf16(&"a".repeat(300));
+    if open_file_in(&mut t, &long, ro) != Err(0xC000_0106) {
+        return Err("caminho longo deveria dar NAME_TOO_LONG");
+    }
+    // Read-only filesystem: write access is refused.
+    if open_file_in(&mut t, &utf16("C:\\cat.txt"), 0x4000_0000) != Err(0xC000_0022) {
+        return Err("acesso de escrita deveria dar ACCESS_DENIED");
+    }
+    if t.get(12).is_some() {
+        return Err("falhas nao deveriam alocar handles");
+    }
+    Ok(())
+}
+
+fn file_path_normalization() -> Result<(), &'static str> {
+    use crate::fs::lookup;
+    let want = Some(CAT);
+    for p in [
+        "cat.txt",
+        "C:\\cat.txt",
+        "c:/cat.txt",
+        "\\??\\C:\\Cat.TXT",
+        "C:\\.\\cat.txt",
+        "C:\\\\cat.txt",
+    ] {
+        if lookup(p) != want {
+            return Err("caminho equivalente nao resolveu");
+        }
+    }
+    for p in [
+        "",
+        "C:\\",
+        "C:\\..",
+        "..",
+        "c:\\cat.txt\\x",
+        "cat.txt\\..\\cat.txt",
+    ] {
+        if lookup(p).is_some() {
+            return Err("caminho invalido resolveu");
+        }
+    }
+    Ok(())
+}
+
+fn file_syscalls_reject_kernel_thread() -> Result<(), &'static str> {
+    use crate::syscall::{NT_OPEN_FILE, NT_QUERY_FILE_SIZE, NT_SET_FILE_POINTER, dispatch};
+    // A kernel thread has no handle table: nothing may panic or succeed.
+    if dispatch(NT_OPEN_FILE, 0, 0, 0, 0x8000_0000, 0) == 0 {
+        return Err("open sem processo deveria falhar");
+    }
+    if dispatch(NT_SET_FILE_POINTER, 12, 0, 0, 0, 0) == 0 {
+        return Err("seek sem processo deveria falhar");
+    }
+    if dispatch(NT_QUERY_FILE_SIZE, 12, 0, 0, 0, 0) == 0 {
+        return Err("size sem processo deveria falhar");
+    }
+    Ok(())
 }
 
 fn handle_table_bounds_and_close() -> Result<(), &'static str> {

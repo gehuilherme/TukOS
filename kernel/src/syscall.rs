@@ -15,11 +15,21 @@ pub const NT_CLOSE: u64 = 4;
 pub const NT_ALLOCATE_VIRTUAL_MEMORY: u64 = 5;
 pub const NT_FREE_VIRTUAL_MEMORY: u64 = 6;
 pub const NT_READ_FILE: u64 = 7;
+/// TukOS-specific (not the real NtOpenFile signature): see `nt_open_file`.
+pub const NT_OPEN_FILE: u64 = 8;
+/// `(handle, distance_i64, method, out_new_offset_u64_ptr)`; see `nt_set_file_pointer`.
+pub const NT_SET_FILE_POINTER: u64 = 9;
+/// `(handle, out_size_u64_ptr)`; see `nt_query_file_size`.
+pub const NT_QUERY_FILE_SIZE: u64 = 10;
 #[cfg(feature = "ktest")]
 pub const SYS_SUM6: u64 = 100;
 pub const STATUS_SUCCESS: u64 = 0;
 pub const STATUS_ACCESS_VIOLATION: u64 = 0xC000_0005;
 pub const STATUS_INVALID_HANDLE: u64 = 0xC000_0008;
+pub const STATUS_INVALID_PARAMETER: u64 = 0xC000_000D;
+pub const STATUS_OBJECT_NAME_NOT_FOUND: u64 = 0xC000_0034;
+pub const STATUS_ACCESS_DENIED: u64 = 0xC000_0022;
+pub const STATUS_NAME_TOO_LONG: u64 = 0xC000_0106;
 
 #[cfg(feature = "ktest")]
 pub static LAST_WRITE_LEN: AtomicU64 = AtomicU64::new(0);
@@ -103,6 +113,9 @@ const MAX_CONSOLE_READ: usize = 4096;
 fn nt_read_file(handle: u64, iosb: u64, buf: u64, len: u64) -> u64 {
     let len = len as u32 as u64; // ULONG: the upper half of the slot is undefined
     let obj = crate::sched::with_current_handles(|t| t.get(handle).cloned()).flatten();
+    if matches!(obj, Some(crate::object::Object::File { .. })) {
+        return nt_read_initrd_file(handle, iosb, buf, len);
+    }
     if obj != Some(crate::object::Object::ConsoleInput) {
         return STATUS_INVALID_HANDLE;
     }
@@ -144,6 +157,125 @@ fn nt_read_file(handle: u64, iosb: u64, buf: u64, len: u64) -> u64 {
         return STATUS_ACCESS_VIOLATION;
     }
     STATUS_SUCCESS
+}
+
+/// NtReadFile on an initrd file handle: copies `min(len, size - offset)` bytes
+/// (0 at EOF, still success) and advances the per-handle offset only after the
+/// user buffer and IO_STATUS_BLOCK were written successfully.
+fn nt_read_initrd_file(handle: u64, iosb: u64, buf: u64, len: u64) -> u64 {
+    let Some(Some(data)) =
+        crate::sched::with_current_handles(|t| t.file_peek(handle, len as usize))
+    else {
+        return STATUS_INVALID_HANDLE;
+    };
+    let mut block = [0u8; 16];
+    block[..8].copy_from_slice(&STATUS_SUCCESS.to_le_bytes());
+    block[8..].copy_from_slice(&(data.len() as u64).to_le_bytes());
+    if !crate::usercopy::copy_to_user(buf, data) || !crate::usercopy::copy_to_user(iosb, &block) {
+        return STATUS_ACCESS_VIOLATION;
+    }
+    let _ = crate::sched::with_current_handles(|t| t.file_commit(handle, data.len()));
+    STATUS_SUCCESS
+}
+
+/// Longest accepted path, in bytes of UTF-16 (260 WCHARs = MAX_PATH).
+const MAX_PATH_BYTES: u64 = 520;
+/// Access bits that imply modification: FILE_WRITE_DATA, FILE_APPEND_DATA,
+/// FILE_WRITE_ATTRIBUTES, DELETE, WRITE_DAC, WRITE_OWNER, GENERIC_WRITE/ALL.
+const WRITE_ACCESS_MASK: u32 =
+    0x0002 | 0x0004 | 0x0100 | 0x0001_0000 | 0x0004_0000 | 0x0008_0000 | 0x4000_0000 | 0x1000_0000;
+
+/// Opens an initrd file by raw UTF-16LE path bytes into `table`. Pure core of
+/// `nt_open_file` (no user memory): decodes with a bound, refuses write access,
+/// normalizes + looks up, inserts `Object::File`. Errors allocate nothing.
+pub fn open_file_in(
+    table: &mut crate::object::HandleTable,
+    path: &[u8],
+    access: u32,
+) -> Result<u64, u64> {
+    if path.len() as u64 > MAX_PATH_BYTES {
+        return Err(STATUS_NAME_TOO_LONG);
+    }
+    if !path.len().is_multiple_of(2) {
+        return Err(STATUS_INVALID_PARAMETER);
+    }
+    if access & WRITE_ACCESS_MASK != 0 {
+        return Err(STATUS_ACCESS_DENIED);
+    }
+    let units = path
+        .chunks_exact(2)
+        .map(|c| u16::from_le_bytes([c[0], c[1]]));
+    let mut s = alloc::string::String::with_capacity(path.len() / 2);
+    for r in char::decode_utf16(units) {
+        match r {
+            Ok(c) if c.is_ascii() => s.push(c),
+            // Non-ASCII / unpaired surrogate: nothing in the initrd can match.
+            _ => return Err(STATUS_OBJECT_NAME_NOT_FOUND),
+        }
+    }
+    let content = crate::fs::lookup(&s).ok_or(STATUS_OBJECT_NAME_NOT_FOUND)?;
+    Ok(table.insert(crate::object::Object::File { content, offset: 0 }))
+}
+
+/// NT_OPEN_FILE (nr 8), TukOS-specific, all four args in registers:
+///   a0 = `HANDLE* out_handle` (u64 written on success only; untouched on error)
+///   a1 = `const WCHAR* path` (UTF-16LE, NOT NUL-terminated)
+///   a2 = path length in BYTES (ULONG, <= 520)
+///   a3 = desired access (ULONG; any write-class bit -> STATUS_ACCESS_DENIED)
+/// Status: SUCCESS; OBJECT_NAME_NOT_FOUND (missing / non-ASCII / `..` / other
+/// drive); NAME_TOO_LONG; INVALID_PARAMETER (odd length); ACCESS_DENIED;
+/// ACCESS_VIOLATION (bad user pointer); INVALID_HANDLE if the caller has no
+/// handle table (kernel thread).
+fn nt_open_file(out: u64, path_ptr: u64, path_len: u64, access: u64) -> u64 {
+    let path_len = path_len as u32 as u64;
+    let access = access as u32;
+    if path_len > MAX_PATH_BYTES {
+        return STATUS_NAME_TOO_LONG;
+    }
+    if !crate::sched::current_is_user() {
+        return STATUS_INVALID_HANDLE;
+    }
+    let Some(path) = crate::usercopy::copy_from_user(path_ptr, path_len) else {
+        return STATUS_ACCESS_VIOLATION;
+    };
+    let handle = match crate::sched::with_current_handles(|t| open_file_in(t, &path, access)) {
+        Some(Ok(h)) => h,
+        Some(Err(st)) => return st,
+        None => return STATUS_INVALID_HANDLE,
+    };
+    if !crate::usercopy::copy_to_user(out, &handle.to_le_bytes()) {
+        let _ = crate::sched::with_current_handles(|t| t.close(handle)); // no leak
+        return STATUS_ACCESS_VIOLATION;
+    }
+    STATUS_SUCCESS
+}
+
+/// NT_SET_FILE_POINTER (nr 9): a0 = handle, a1 = signed 64-bit distance,
+/// a2 = method (0 BEGIN, 1 CURRENT, 2 END), a3 = `u64* out_new_offset`.
+/// Negative result -> INVALID_PARAMETER; past-EOF clamps to the size.
+fn nt_set_file_pointer(handle: u64, distance: u64, method: u64, out: u64) -> u64 {
+    let r =
+        crate::sched::with_current_handles(|t| t.file_seek(handle, distance as i64, method as u32));
+    match r {
+        Some(Ok(new)) if crate::usercopy::copy_to_user(out, &new.to_le_bytes()) => STATUS_SUCCESS,
+        Some(Ok(_)) => STATUS_ACCESS_VIOLATION,
+        Some(Err(st)) => st,
+        None => STATUS_INVALID_HANDLE,
+    }
+}
+
+/// NT_QUERY_FILE_SIZE (nr 10): a0 = handle, a1 = `u64* out_size`.
+fn nt_query_file_size(handle: u64, out: u64) -> u64 {
+    match crate::sched::with_current_handles(|t| t.file_size(handle)) {
+        Some(Some(sz)) => {
+            if crate::usercopy::copy_to_user(out, &sz.to_le_bytes()) {
+                STATUS_SUCCESS
+            } else {
+                STATUS_ACCESS_VIOLATION
+            }
+        }
+        _ => STATUS_INVALID_HANDLE,
+    }
 }
 
 /// Core of NtWriteFile once the stack arguments are decoded.
@@ -299,6 +431,9 @@ pub extern "C" fn dispatch(nr: u64, a0: u64, a1: u64, a2: u64, _a3: u64, _user_r
             };
             nt_read_file(a0, iosb, buf, len & 0xFFFF_FFFF)
         }
+        NT_OPEN_FILE => nt_open_file(a0, a1, a2, _a3),
+        NT_SET_FILE_POINTER => nt_set_file_pointer(a0, a1, a2, _a3),
+        NT_QUERY_FILE_SIZE => nt_query_file_size(a0, a1),
         NT_ALLOCATE_VIRTUAL_MEMORY => {
             // NtAllocateVirtualMemory(Process, *Base, ZeroBits, *Size, AllocType,
             // Protect): ZeroBits (a2) is ignored; the last two are on the stack.

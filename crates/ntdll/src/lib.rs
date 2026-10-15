@@ -154,6 +154,26 @@ pub extern "system" fn NtReadFile() {
     core::arch::naked_asm!("mov r10, rcx", "mov eax, 7", "syscall", "ret");
 }
 
+// TukOS file extensions (NT_OPEN_FILE = 8, NT_SET_FILE_POINTER = 9,
+// NT_QUERY_FILE_SIZE = 10); arg layouts documented in kernel/src/syscall.rs.
+#[unsafe(naked)]
+#[unsafe(no_mangle)]
+pub extern "system" fn NtTukosOpenFile() {
+    core::arch::naked_asm!("mov r10, rcx", "mov eax, 8", "syscall", "ret");
+}
+
+#[unsafe(naked)]
+#[unsafe(no_mangle)]
+pub extern "system" fn NtTukosSetFilePointer() {
+    core::arch::naked_asm!("mov r10, rcx", "mov eax, 9", "syscall", "ret");
+}
+
+#[unsafe(naked)]
+#[unsafe(no_mangle)]
+pub extern "system" fn NtTukosQueryFileSize() {
+    core::arch::naked_asm!("mov r10, rcx", "mov eax, 10", "syscall", "ret");
+}
+
 /// `RtlExitUserProcess(code)`: a real function (NOT a bare forwarder to the
 /// 2-arg `NtTerminateProcess`) that terminates the current process with `code`.
 #[unsafe(no_mangle)]
