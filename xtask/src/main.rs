@@ -21,7 +21,9 @@ fn main() -> ExitCode {
         Some("run") => conformance::build_shell_programs()
             .and_then(|()| image::build(&["shell"]))
             .and_then(|esp| qemu::run_interactive(&esp)),
-        Some("vmware") => image::build(&[]).and_then(|esp| vmware::run(&esp)),
+        Some("vmware") => conformance::build_shell_programs()
+            .and_then(|()| image::build(&["shell"]))
+            .and_then(|esp| vmware::run_interactive(&esp)),
         Some("ktest") => ktest::run_all(),
         Some("conformance") => conformance::run_conformance(),
         Some("ntdll") => ntdll::build().map(|p| println!("ntdll.dll em {}", p.display())),

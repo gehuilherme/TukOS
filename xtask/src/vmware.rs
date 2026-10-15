@@ -4,8 +4,6 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
 
-const BOOT_WAIT: Duration = Duration::from_secs(30);
-
 pub fn missing_vmrun_message(tried: &[PathBuf]) -> String {
     let mut msg = String::from("vmrun nao encontrado. Caminhos testados:\n");
     for p in tried {
@@ -51,7 +49,11 @@ serial0.fileName = "{serial_file}"
     )
 }
 
-pub fn run(esp: &Path) -> crate::Result<()> {
+/// Starts TukOS in VMware with a GUI window and LEAVES THE VM RUNNING, so the
+/// user can interact (e.g. type at the shell prompt). Captures a few seconds of
+/// serial to confirm the boot reached a known marker, then returns without
+/// stopping the VM. Use `vmrun -T ws stop <vmx>` or close the window to end it.
+pub fn run_interactive(esp: &Path) -> crate::Result<()> {
     let vmrun = find_vmrun()?;
     let dir = crate::util::workspace_root().join("target").join("vmware");
     let _ = std::fs::remove_dir_all(&dir);
@@ -72,26 +74,29 @@ pub fn run(esp: &Path) -> crate::Result<()> {
             .arg(&vmx)
             .arg("gui"),
     )?;
+    // Give it a few seconds to boot and capture early serial, but DO NOT stop it.
     let start = Instant::now();
     let mut text = String::new();
-    while start.elapsed() < BOOT_WAIT {
+    while start.elapsed() < Duration::from_secs(10) {
         std::thread::sleep(Duration::from_secs(2));
         text = std::fs::read_to_string(&serial).unwrap_or_default();
-        if text.contains("TukOS pronto") || text.contains("@@TUKOS-PANIC") {
+        if text.contains("tukos>") || text.contains("@@TUKOS-PANIC") {
             break;
         }
     }
-    let _ = Command::new(&vmrun)
-        .args(["-T", "ws", "stop"])
-        .arg(&vmx)
-        .arg("hard")
-        .status();
-    println!("--- serial (VMware) ---\n{text}");
-    if text.contains("TukOS pronto") {
-        Ok(())
-    } else {
-        Err("o TukOS nao chegou a 'TukOS pronto' no VMware (veja a serial acima)".into())
+    println!("--- serial inicial (VMware) ---\n{text}\n--- fim ---");
+    println!("VM 'TukOS' rodando no VMware (janela aberta). Digite no shell.");
+    println!("vmx: {}", vmx.display());
+    println!("serial: {}", serial.display());
+    println!(
+        "Para encerrar: feche a janela ou `\"{}\" -T ws stop \"{}\"`.",
+        vmrun.display(),
+        vmx.display()
+    );
+    if text.contains("@@TUKOS-PANIC") {
+        return Err("o TukOS deu panic no boot (veja a serial acima)".into());
     }
+    Ok(())
 }
 
 /// Writes a monolithic-flat VMDK descriptor pointing at the raw image.
