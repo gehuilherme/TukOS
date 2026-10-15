@@ -168,7 +168,7 @@ const TESTS: &[(&str, TestFn)] = &[
     ("valloc_rejects_overlap", valloc_rejects_overlap),
     ("valloc_rejects_kernel_range", valloc_rejects_kernel_range),
     // Deve ser o ULTIMO: esgota a tabela de threads (Plan 18 Task 1).
-    ("thread_slots_exhaust", thread_slots_exhaust),
+    ("thread_slots_recycle", thread_slots_recycle),
 ];
 
 static SURVIVOR_RAN: AtomicU64 = AtomicU64::new(0);
@@ -2258,21 +2258,18 @@ fn slot_child() {
     crate::sched::exit_current();
 }
 
-/// Reproducer for docs/observations/2026-10-14-thread-slot-exhaustion.md.
+/// Regression for docs/observations/2026-10-14-thread-slot-exhaustion.md.
 /// Spawns ONE short-lived kernel thread at a time, waits for it to exit and be
-/// reaped (frames back to baseline), up to 80 times. Today the Exited slots are
-/// never reclaimed, so the thread table runs out after MAX_THREADS - (slots
-/// already used) spawns although frames are at baseline every time. This test
-/// asserts the CURRENT (buggy) behaviour so the suite stays green; Plan 18
-/// Task 2 inverts it into the regression (all 80 spawns must succeed).
-fn thread_slots_exhaust() -> Result<(), &'static str> {
+/// reaped (frames back to baseline), 200 times (well over MAX_THREADS = 64).
+/// Reaped slots must be recycled, so every spawn succeeds.
+fn thread_slots_recycle() -> Result<(), &'static str> {
     for _ in 0..100 {
         crate::sched::yield_now();
     }
     let baseline = crate::mem::frames::free_frame_count();
     let (used0, max) = crate::sched::slot_usage_for_test();
     let mut failed_at: Option<usize> = None;
-    for i in 0..80usize {
+    for i in 0..200usize {
         if !crate::sched::has_thread_capacity() {
             failed_at = Some(i);
             break;
@@ -2290,7 +2287,12 @@ fn thread_slots_exhaust() -> Result<(), &'static str> {
         if !done {
             return Err("filho nao executou");
         }
-        for _ in 0..50 {
+        // Leftover spinner threads burn a timer tick per yield, so yield only until
+        // the reaper has returned the frames (it runs on the first switch back).
+        for _ in 0..10 {
+            if crate::mem::frames::free_frame_count() == baseline {
+                break;
+            }
             crate::sched::yield_now();
         }
         if crate::mem::frames::free_frame_count() != baseline {
@@ -2299,7 +2301,7 @@ fn thread_slots_exhaust() -> Result<(), &'static str> {
     }
     let (used1, _) = crate::sched::slot_usage_for_test();
     crate::kprintln!(
-        "thread_slots_exhaust: slots_usados_inicio={} max={} falhou_na_iteracao={:?} slots_usados_fim={} frames_baseline={} frames_agora={}",
+        "thread_slots_recycle: slots_usados_inicio={} max={} falhou_na_iteracao={:?} slots_usados_fim={} frames_baseline={} frames_agora={}",
         used0,
         max,
         failed_at,
@@ -2307,10 +2309,8 @@ fn thread_slots_exhaust() -> Result<(), &'static str> {
         baseline,
         crate::mem::frames::free_frame_count()
     );
-    match failed_at {
-        // Bug atual: spawn falha apos esgotar slots, com frames na baseline.
-        Some(i) if i == max - used0 && crate::mem::frames::free_frame_count() == baseline => Ok(()),
-        Some(_) => Err("falha em iteracao inesperada"),
-        None => Err("spawn nunca falhou (bug corrigido? inverta este teste)"),
+    if failed_at.is_some() {
+        return Err("spawn falhou: slots nao reciclados");
     }
+    Ok(())
 }

@@ -21,6 +21,9 @@ const MAX_THREADS: usize = 64;
 enum ThreadState {
     Ready,
     Exited,
+    /// Tombstone of a reaped slot: holds no resources and is reusable by spawn.
+    /// The index stays valid; only a later spawn gives it a new owner.
+    Free,
 }
 
 struct Thread {
@@ -115,24 +118,38 @@ pub fn spawn(entry: fn()) -> usize {
     }
     let mut guard = SCHED.lock();
     let s = guard.as_mut().expect("scheduler nao iniciado");
-    assert!(
-        s.threads.len() < MAX_THREADS,
-        "sched: limite de {MAX_THREADS} threads atingido"
-    );
-    s.threads.push(Thread {
-        rsp,
-        entry: Some(entry),
-        _stack: Some(stack),
-        cr3: 0,
-        kstack_top: 0,
-        state: ThreadState::Ready,
-        space: None,
-        teb_va: 0,
-        handle_table: None,
-        proc_exit: None,
-        fpu: Box::default(),
-    });
-    s.threads.len() - 1
+    // Only 64 SIMULTANEOUSLY live threads can still hit this limit (panic).
+    place_thread(
+        s,
+        Thread {
+            rsp,
+            entry: Some(entry),
+            _stack: Some(stack),
+            cr3: 0,
+            kstack_top: 0,
+            state: ThreadState::Ready,
+            space: None,
+            teb_va: 0,
+            handle_table: None,
+            proc_exit: None,
+            fpu: Box::default(),
+        },
+    )
+    .expect("sched: limite de threads atingido")
+}
+
+/// Stores `t` in a `Free` slot (reuse, index stable) or grows the table; None
+/// when every slot is live and the table is at MAX_THREADS.
+fn place_thread(s: &mut Scheduler, t: Thread) -> Option<usize> {
+    if let Some(i) = s.threads.iter().position(|x| x.state == ThreadState::Free) {
+        s.threads[i] = t;
+        return Some(i);
+    }
+    if s.threads.len() >= MAX_THREADS {
+        return None;
+    }
+    s.threads.push(t);
+    Some(s.threads.len() - 1)
 }
 
 /// Spawns a thread whose first run drops to Ring 3 at `entry` with stack
@@ -157,10 +174,9 @@ pub fn slot_usage_for_test() -> (usize, usize) {
 
 /// True if the thread table has room for one more thread.
 pub fn has_thread_capacity() -> bool {
-    SCHED
-        .lock()
-        .as_ref()
-        .is_some_and(|s| s.threads.len() < MAX_THREADS)
+    SCHED.lock().as_ref().is_some_and(|s| {
+        s.threads.len() < MAX_THREADS || s.threads.iter().any(|t| t.state == ThreadState::Free)
+    })
 }
 
 /// Like `spawn_user`, but the new thread also carries `proc_exit` (installed
@@ -199,11 +215,7 @@ pub fn spawn_user_with_exit(
     debug_assert_eq!(console_in, crate::object::CONSOLE_INPUT_HANDLE);
     let mut guard = SCHED.lock();
     let s = guard.as_mut().expect("scheduler nao iniciado");
-    if s.threads.len() >= MAX_THREADS {
-        drop(guard); // AddressSpace::drop takes the frames lock
-        return None;
-    }
-    s.threads.push(Thread {
+    let t = Thread {
         rsp,
         entry: None,
         _stack: Some(kstack),
@@ -215,8 +227,15 @@ pub fn spawn_user_with_exit(
         handle_table: Some(handles),
         proc_exit,
         fpu: Box::default(),
-    });
-    Some(s.threads.len() - 1)
+    };
+    // `place_thread` drops `t` (space, kstack) on failure while the lock is held;
+    // so check capacity first and only then hand it over.
+    if s.threads.len() >= MAX_THREADS && !s.threads.iter().any(|x| x.state == ThreadState::Free) {
+        drop(guard);
+        drop(t); // AddressSpace::drop takes the frames lock
+        return None;
+    }
+    place_thread(s, t)
 }
 
 /// Switches to the next thread. The scheduler guard is dropped before the
@@ -231,7 +250,7 @@ fn switch_to_next() {
         let from = s.current;
         let n = s.threads.len();
         let mut to = (from + 1) % n;
-        while s.threads[to].state == ThreadState::Exited && to != from {
+        while matches!(s.threads[to].state, ThreadState::Exited | ThreadState::Free) && to != from {
             to = (to + 1) % n;
         }
         if to == from && s.threads[from].state == ThreadState::Exited {
@@ -298,15 +317,27 @@ fn reap_pending() {
     let taken = {
         let mut guard = SCHED.lock();
         let Some(s) = guard.as_mut() else { return };
-        s.reap
-            .take()
-            .map(|idx| (s.threads[idx].space.take(), s.threads[idx]._stack.take()))
+        s.reap.take().map(|idx| {
+            let t = &mut s.threads[idx];
+            debug_assert!(t.state == ThreadState::Exited && idx != s.current);
+            let r = (
+                t.space.take(),
+                t._stack.take(),
+                t.handle_table.take(),
+                t.proc_exit.take(),
+            );
+            // Recyclable from now on; nothing dangles.
+            t.state = ThreadState::Free;
+            t.entry = None;
+            t.cr3 = 0;
+            t.kstack_top = 0;
+            t.teb_va = 0;
+            t.rsp = 0;
+            r
+        })
     };
     // Dropped outside the SCHED lock: AddressSpace::drop takes the frames lock.
-    if let Some((space, stack)) = taken {
-        drop(space);
-        drop(stack);
-    }
+    drop(taken);
 }
 
 /// Terminates the current (user) thread: marks it Exited and switches away; its
