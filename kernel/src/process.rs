@@ -607,7 +607,7 @@ pub fn build_exe_ntdll_space() -> ExeSpace {
 
 /// Same as `build_exe_ntdll_space` for an arbitrary test `.exe`.
 pub fn build_exe_ntdll_space_with(exe: alloc::vec::Vec<u8>) -> ExeSpace {
-    build_space(exe, false)
+    build_space(exe, false, &[])
 }
 
 const KERNEL32_LOAD_BASE: u64 = 0x0800_0000;
@@ -617,10 +617,16 @@ pub const KERNEL32_BASE: u64 = KERNEL32_LOAD_BASE;
 /// kernel32 0x0800_0000, ntdll 0x1000_0000) and lists them in load order
 /// exe, kernel32, ntdll. Requires both DLLs to be embedded.
 pub fn build_exe_k32_space_with(exe: alloc::vec::Vec<u8>) -> ExeSpace {
-    build_space(exe, true)
+    build_space(exe, true, &[])
 }
 
-fn build_space(exe: alloc::vec::Vec<u8>, with_k32: bool) -> ExeSpace {
+/// `build_exe_k32_space_with` with an explicit command line (UTF-16, no NUL) stored in
+/// `PEB->ProcessParameters->CommandLine`. Empty = default image name.
+pub fn build_exe_k32_space_with_cmdline(exe: alloc::vec::Vec<u8>, cmdline: &[u16]) -> ExeSpace {
+    build_space(exe, true, cmdline)
+}
+
+fn build_space(exe: alloc::vec::Vec<u8>, with_k32: bool, cmdline: &[u16]) -> ExeSpace {
     let nt = crate::ntdll_image::NTDLL_BYTES;
     let k32 = crate::kernel32_image::KERNEL32_BYTES;
     let space = AddressSpace::new_user();
@@ -689,8 +695,14 @@ fn build_space(exe: alloc::vec::Vec<u8>, with_k32: bool) -> ExeSpace {
     )
     .expect("teb setup");
     crate::teb::setup_ldr(&space, ldr_va, peb_va, &mods).expect("ldr setup");
-    crate::teb::setup_process_parameters(&space, params_va, peb_va, crate::object::CONSOLE_HANDLE)
-        .expect("process parameters setup");
+    crate::teb::setup_process_parameters(
+        &space,
+        params_va,
+        peb_va,
+        crate::object::CONSOLE_HANDLE,
+        cmdline,
+    )
+    .expect("process parameters setup");
     ExeSpace {
         space,
         exe,
@@ -763,6 +775,16 @@ pub fn spawn_exe_image_with_k32_exit(
     exe: alloc::vec::Vec<u8>,
     proc_exit: Option<alloc::sync::Arc<crate::object::ProcExit>>,
 ) -> Result<(), SpawnError> {
+    spawn_exe_image_with_k32_cmd(exe, proc_exit, &[])
+}
+
+/// `spawn_exe_image_with_k32_exit` plus the child's command line (UTF-16, no NUL;
+/// empty = default image name).
+pub fn spawn_exe_image_with_k32_cmd(
+    exe: alloc::vec::Vec<u8>,
+    proc_exit: Option<alloc::sync::Arc<crate::object::ProcExit>>,
+    cmdline: &[u16],
+) -> Result<(), SpawnError> {
     let nt = crate::ntdll_image::NTDLL_BYTES;
     if nt.is_empty() || crate::kernel32_image::KERNEL32_BYTES.is_empty() {
         return Err(SpawnError::NoDlls);
@@ -770,7 +792,7 @@ pub fn spawn_exe_image_with_k32_exit(
     if !crate::sched::has_thread_capacity() {
         return Err(SpawnError::NoThreads);
     }
-    let es = build_exe_k32_space_with(exe);
+    let es = build_exe_k32_space_with_cmdline(exe, cmdline);
     let rva = pe::PeFile::parse(nt)
         .ok()
         .and_then(|p| p.export_rva_by_name("LdrInitializeThunk"))

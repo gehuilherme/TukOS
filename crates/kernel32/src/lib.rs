@@ -140,7 +140,13 @@ unsafe extern "system" {
     fn NtTukosSetFilePointer(handle: isize, dist: i64, method: u32, out_new: *mut u64) -> i32;
     fn NtTukosQueryFileSize(handle: isize, out_size: *mut u64) -> i32;
     // TukOS process extensions (kernel/src/syscall.rs NT_CREATE_PROCESS/NT_WAIT/NT_QUERY_EXIT_CODE).
-    fn NtTukosCreateProcess(path: *const u16, path_bytes: u32, out_process: *mut isize) -> i32;
+    fn NtTukosCreateProcess(
+        path: *const u16,
+        path_bytes: u32,
+        out_process: *mut isize,
+        cmdline: *const u16,
+        cmdline_bytes: u32,
+    ) -> i32;
     fn NtTukosWait(process: isize) -> i32;
     fn NtTukosQueryExitCode(process: isize, out_code: *mut u32) -> i32;
     fn NtTerminateProcess(process: isize, status: i32) -> i32;
@@ -1147,7 +1153,8 @@ pub unsafe extern "system" fn CreateProcessA(
         return 0;
     }
     let mut h: isize = 0;
-    let st = unsafe { NtTukosCreateProcess(buf.as_ptr(), (n * 2) as u32, &mut h) };
+    let st =
+        unsafe { NtTukosCreateProcess(buf.as_ptr(), (n * 2) as u32, &mut h, core::ptr::null(), 0) };
     if st < 0 {
         SetLastError(match st {
             STATUS_INSUFFICIENT_RESOURCES => ERROR_NOT_ENOUGH_MEMORY_PROC,

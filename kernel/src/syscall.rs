@@ -286,6 +286,25 @@ fn nt_open_file(out: u64, path_ptr: u64, path_len: u64, access: u64) -> u64 {
 /// exit state shared with the child. Pure core of `nt_create_process`: touches no
 /// user memory and no handle table, and holds no lock across the spawn.
 pub fn create_process(path: &[u8]) -> Result<alloc::sync::Arc<crate::object::ProcExit>, u64> {
+    create_process_cmd(path, &[])
+}
+
+/// Longest accepted command line, in bytes of UTF-16 (256 WCHARs). Longer is rejected
+/// with STATUS_NAME_TOO_LONG (never silently truncated at the syscall boundary).
+pub const MAX_CMDLINE_BYTES: u64 = 512;
+
+/// `create_process` with the child's command line (UTF-16LE bytes, even length,
+/// <= `MAX_CMDLINE_BYTES`). Empty = the child's command line is the image path.
+pub fn create_process_cmd(
+    path: &[u8],
+    cmdline: &[u8],
+) -> Result<alloc::sync::Arc<crate::object::ProcExit>, u64> {
+    if cmdline.len() as u64 > MAX_CMDLINE_BYTES {
+        return Err(STATUS_NAME_TOO_LONG);
+    }
+    if !cmdline.len().is_multiple_of(2) {
+        return Err(STATUS_INVALID_PARAMETER);
+    }
     if path.len() as u64 > MAX_PATH_BYTES {
         return Err(STATUS_NAME_TOO_LONG);
     }
@@ -304,7 +323,18 @@ pub fn create_process(path: &[u8]) -> Result<alloc::sync::Arc<crate::object::Pro
     }
     let image = crate::fs::lookup(&s).ok_or(STATUS_OBJECT_NAME_NOT_FOUND)?;
     let exit = crate::object::ProcExit::new();
-    match crate::process::spawn_exe_image_with_k32_exit(image.to_vec(), Some(exit.clone())) {
+    // Empty command line -> the image path as given (so argv[0] exists).
+    let cmd: alloc::vec::Vec<u16> = if cmdline.is_empty() {
+        path.chunks_exact(2)
+            .map(|c| u16::from_le_bytes([c[0], c[1]]))
+            .collect()
+    } else {
+        cmdline
+            .chunks_exact(2)
+            .map(|c| u16::from_le_bytes([c[0], c[1]]))
+            .collect()
+    };
+    match crate::process::spawn_exe_image_with_k32_cmd(image.to_vec(), Some(exit.clone()), &cmd) {
         Ok(()) => Ok(exit),
         Err(crate::process::SpawnError::NoDlls) => Err(STATUS_UNSUCCESSFUL),
         Err(crate::process::SpawnError::NoThreads) => Err(STATUS_INSUFFICIENT_RESOURCES),
@@ -322,9 +352,15 @@ pub fn wait_for_exit(exit: &crate::object::ProcExit) {
 /// a1 = path length in BYTES (<= 520), a2 = `HANDLE* out_process` (written on success
 /// only). Status: SUCCESS; OBJECT_NAME_NOT_FOUND; NAME_TOO_LONG; INVALID_PARAMETER;
 /// ACCESS_VIOLATION; INSUFFICIENT_RESOURCES; INVALID_HANDLE for a kernel caller.
-fn nt_create_process(path_ptr: u64, path_len: u64, out: u64) -> u64 {
+/// Command line (5 args; arg 4 is in r9, arg 5 on the stack at `[rsp+0x28]`):
+/// a3 = `const WCHAR* cmdline` (UTF-16LE, not NUL-terminated; may be NULL), stack_arg(0)
+/// = cmdline length in BYTES (even, <= 512; > 512 -> NAME_TOO_LONG, odd ->
+/// INVALID_PARAMETER). NULL pointer or length 0 = the child's command line is the
+/// image path. It is stored in the child's PEB->ProcessParameters->CommandLine.
+fn nt_create_process(path_ptr: u64, path_len: u64, out: u64, cmd_ptr: u64, cmd_len: u64) -> u64 {
     let path_len = path_len as u32 as u64;
-    if path_len > MAX_PATH_BYTES {
+    let cmd_len = cmd_len as u32 as u64;
+    if path_len > MAX_PATH_BYTES || cmd_len > MAX_CMDLINE_BYTES {
         return STATUS_NAME_TOO_LONG;
     }
     if !crate::sched::current_is_user() {
@@ -333,11 +369,19 @@ fn nt_create_process(path_ptr: u64, path_len: u64, out: u64) -> u64 {
     let Some(path) = crate::usercopy::copy_from_user(path_ptr, path_len) else {
         return STATUS_ACCESS_VIOLATION;
     };
+    let cmdline = if cmd_ptr == 0 || cmd_len == 0 {
+        alloc::vec::Vec::new()
+    } else {
+        match crate::usercopy::copy_from_user(cmd_ptr, cmd_len) {
+            Some(c) => c,
+            None => return STATUS_ACCESS_VIOLATION,
+        }
+    };
     // Validate the out pointer BEFORE spawning anything.
     if !crate::usercopy::copy_to_user(out, &[0u8; 8]) {
         return STATUS_ACCESS_VIOLATION;
     }
-    let exit = match create_process(&path) {
+    let exit = match create_process_cmd(&path, &cmdline) {
         Ok(e) => e,
         Err(st) => return st,
     };
@@ -571,7 +615,12 @@ pub extern "C" fn dispatch(nr: u64, a0: u64, a1: u64, a2: u64, _a3: u64, _user_r
         NT_OPEN_FILE => nt_open_file(a0, a1, a2, _a3),
         NT_SET_FILE_POINTER => nt_set_file_pointer(a0, a1, a2, _a3),
         NT_QUERY_FILE_SIZE => nt_query_file_size(a0, a1),
-        NT_CREATE_PROCESS => nt_create_process(a0, a1, a2),
+        NT_CREATE_PROCESS => {
+            let Some(cmd_len) = stack_arg(_user_rsp, 0) else {
+                return STATUS_ACCESS_VIOLATION;
+            };
+            nt_create_process(a0, a1, a2, _a3, cmd_len)
+        }
         NT_WAIT => nt_wait(a0),
         NT_QUERY_EXIT_CODE => nt_query_exit_code(a0, a1),
         NT_ALLOCATE_VIRTUAL_MEMORY => {

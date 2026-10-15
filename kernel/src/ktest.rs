@@ -103,6 +103,7 @@ const TESTS: &[(&str, TestFn)] = &[
     ("create_wait_exit", create_wait_exit),
     ("child_fault_reports_status", child_fault_reports_status),
     ("create_process_errors", create_process_errors),
+    ("child_sees_command_line", child_sees_command_line),
     (
         "loader_rejects_missing_dependency",
         loader_rejects_missing_dependency,
@@ -1937,6 +1938,99 @@ fn child_fault_reports_status() -> Result<(), &'static str> {
     );
     if run_child("test/exit42.exe")? != 0x2A {
         return Err("kernel nao se recuperou do filho com fault");
+    }
+    Ok(())
+}
+
+/// Reads `PEB->ProcessParameters->CommandLine` of a freshly built child space and
+/// returns its UTF-16 text after checking the UNICODE_STRING is well formed.
+fn read_child_cmdline(es: &crate::process::ExeSpace) -> Result<alloc::vec::Vec<u16>, &'static str> {
+    let rd = |va: u64, n: usize| -> Result<alloc::vec::Vec<u8>, &'static str> {
+        let mut out = alloc::vec::Vec::new();
+        for i in 0..n as u64 {
+            let a = va + i;
+            let pa = es
+                .space
+                .translate(a & !0xFFF)
+                .ok_or("pagina do filho nao mapeada")?;
+            let p = crate::mem::frames::phys_to_virt(pa) as *const u8;
+            out.push(unsafe { p.add((a & 0xFFF) as usize).read() });
+        }
+        Ok(out)
+    };
+    let u64_at = |va: u64| -> Result<u64, &'static str> {
+        Ok(u64::from_le_bytes(rd(va, 8)?.try_into().unwrap()))
+    };
+    let pp = u64_at(es.peb_va + 0x20)?;
+    let us = pp + 0x70;
+    let len = u16::from_le_bytes(rd(us, 2)?.try_into().unwrap());
+    let max = u16::from_le_bytes(rd(us + 2, 2)?.try_into().unwrap());
+    let buf = u64_at(us + 8)?;
+    if max != len + 2 || len % 2 != 0 {
+        return Err("UNICODE_STRING CommandLine mal formada (Length/MaximumLength)");
+    }
+    if buf < pp || buf + u64::from(max) > (pp & !0xFFF) + 4096 {
+        return Err("Buffer da CommandLine fora da pagina de parametros");
+    }
+    let raw = rd(buf, usize::from(max))?;
+    let units: alloc::vec::Vec<u16> = raw
+        .chunks_exact(2)
+        .map(|c| u16::from_le_bytes([c[0], c[1]]))
+        .collect();
+    if units.last() != Some(&0) {
+        return Err("CommandLine sem terminador NUL");
+    }
+    Ok(units[..units.len() - 1].to_vec())
+}
+
+fn child_sees_command_line() -> Result<(), &'static str> {
+    if !have_both_dlls() {
+        return Ok(());
+    }
+    let exe = || crate::process::build_exe_exit_code_2a();
+    let w = |s: &str| -> alloc::vec::Vec<u16> { s.encode_utf16().collect() };
+    let es = crate::process::build_exe_k32_space_with_cmdline(exe(), &w("prog alpha beta"));
+    if read_child_cmdline(&es)? != w("prog alpha beta") {
+        return Err("CommandLine do filho != \"prog alpha beta\"");
+    }
+    drop(es);
+    // Empty -> default image name (argv[0] exists).
+    let es = crate::process::build_exe_k32_space_with_cmdline(exe(), &[]);
+    if read_child_cmdline(&es)?.is_empty() {
+        return Err("cmdline vazia deveria virar o nome da imagem");
+    }
+    drop(es);
+    // Overlong -> truncated to 256 units, still well formed and inside the page.
+    let long: alloc::vec::Vec<u16> = core::iter::repeat_n(0x41u16, 2000).collect();
+    let es = crate::process::build_exe_k32_space_with_cmdline(exe(), &long);
+    if read_child_cmdline(&es)?.len() != 256 {
+        return Err("cmdline longa nao foi truncada em 256 unidades");
+    }
+    drop(es);
+    // Syscall-level validation: odd length / too long are rejected before any spawn.
+    let before = crate::mem::frames::free_frame_count();
+    crate::fs::register_test_file("test/exit42.exe", exe().leak());
+    let p = utf16le("test/exit42.exe");
+    if crate::syscall::create_process_cmd(&p, &[0x41]).err()
+        != Some(crate::syscall::STATUS_INVALID_PARAMETER)
+    {
+        return Err("cmdline de tamanho impar deveria ser INVALID_PARAMETER");
+    }
+    if crate::syscall::create_process_cmd(&p, &[0x41; 514]).err()
+        != Some(crate::syscall::STATUS_NAME_TOO_LONG)
+    {
+        return Err("cmdline > 512 bytes deveria ser NAME_TOO_LONG");
+    }
+    // A real child with a command line still runs and exits normally.
+    let exit = crate::syscall::create_process_cmd(&p, &utf16le("exit42 a b"))
+        .map_err(|_| "create_process_cmd falhou")?;
+    crate::syscall::wait_for_exit(&exit);
+    if exit.exit_code() != 0x2A {
+        return Err("filho com cmdline nao saiu com 0x2A");
+    }
+    drop(exit);
+    if crate::mem::frames::free_frame_count() != before {
+        return Err("create com cmdline vazou frames");
     }
     Ok(())
 }

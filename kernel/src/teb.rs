@@ -1,6 +1,8 @@
 //! TEB/PEB construction in a process address space. Offsets follow the public
 //! winternl.h x64 layout (NT_TIB / TEB / PEB).
 
+extern crate alloc;
+
 use crate::mem::space::AddressSpace;
 use mm::paging::PageFlags;
 
@@ -17,7 +19,14 @@ const PARAMS_LENGTH: usize = 0x04;
 const PARAMS_STANDARD_INPUT: usize = 0x20;
 const PARAMS_STANDARD_OUTPUT: usize = 0x28;
 const PARAMS_STANDARD_ERROR: usize = 0x30;
+const PARAMS_COMMAND_LINE: usize = 0x70; // UNICODE_STRING: Length, MaximumLength, Buffer@+8
 const PARAMS_SIZE: u32 = 0x80;
+/// Where the UTF-16 command-line text lives in the params page (user VA = page VA + this).
+const CMDLINE_TEXT_OFF: usize = 0x100;
+/// Max command-line length in UTF-16 units (512 bytes); longer input is truncated.
+pub const MAX_CMDLINE_UNITS: usize = 256;
+/// Command line used when the caller supplies none (argv[0] must exist).
+const DEFAULT_CMDLINE: &str = "program.exe";
 // PEB_LDR_DATA (public winternl.h layout).
 const LDR_LENGTH: usize = 0x00;
 const LDR_INITIALIZED: usize = 0x04;
@@ -154,9 +163,27 @@ pub fn setup_process_parameters(
     params_va: u64,
     peb_va: u64,
     console: u64,
+    cmdline: &[u16],
 ) -> Result<(), ()> {
     let page = map_zeroed_page(space, params_va)?;
+    // Empty -> default name; longer than MAX_CMDLINE_UNITS -> truncated. The text
+    // (+ NUL) ends at most at 0x100 + 514 < 4096, so it always fits the page.
+    let default: alloc::vec::Vec<u16> = DEFAULT_CMDLINE.encode_utf16().collect();
+    let cmd = if cmdline.is_empty() {
+        &default[..]
+    } else {
+        cmdline
+    };
+    let cmd = &cmd[..cmd.len().min(MAX_CMDLINE_UNITS)];
     unsafe {
+        for (i, u) in cmd.iter().enumerate() {
+            (page.add(CMDLINE_TEXT_OFF + i * 2) as *mut u16).write(*u);
+        }
+        // NUL terminator: the page is zeroed, but write it explicitly.
+        (page.add(CMDLINE_TEXT_OFF + cmd.len() * 2) as *mut u16).write(0);
+        (page.add(PARAMS_COMMAND_LINE) as *mut u16).write((cmd.len() * 2) as u16);
+        (page.add(PARAMS_COMMAND_LINE + 2) as *mut u16).write(((cmd.len() + 1) * 2) as u16);
+        (page.add(PARAMS_COMMAND_LINE + 8) as *mut u64).write(params_va + CMDLINE_TEXT_OFF as u64);
         (page.add(PARAMS_MAXIMUM_LENGTH) as *mut u32).write(PARAMS_SIZE);
         (page.add(PARAMS_LENGTH) as *mut u32).write(PARAMS_SIZE);
         (page.add(PARAMS_STANDARD_INPUT) as *mut u64).write(crate::object::CONSOLE_INPUT_HANDLE);
