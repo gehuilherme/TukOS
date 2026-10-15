@@ -11,10 +11,21 @@ use alloc::string::String;
 
 /// (normalized path, contents). Keys must already be in normalized form:
 /// lowercase, `/` separators, no drive, no leading slash.
-const FILES: &[(&str, &[u8])] = &[(
-    "cat.txt",
-    include_bytes!("../../conformance/fileio/cat.txt"),
-)];
+const FILES: &[(&str, &[u8])] = &[
+    (
+        "cat.txt",
+        include_bytes!("../../conformance/fileio/cat.txt"),
+    ),
+    // Conformance programs (empty when not built by `cargo xtask conformance`).
+    (
+        "parent.exe",
+        include_bytes!(concat!(env!("OUT_DIR"), "/parent.exe")),
+    ),
+    (
+        "child.exe",
+        include_bytes!(concat!(env!("OUT_DIR"), "/child.exe")),
+    ),
+];
 
 /// Normalizes `path` to the table's key form; `None` for paths that must never
 /// resolve (traversal, embedded NUL, empty result, a drive other than `C:`).

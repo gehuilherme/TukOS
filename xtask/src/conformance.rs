@@ -99,6 +99,7 @@ fn build_crt_exe(vcvars: &Path, root: &Path, name: &str) -> crate::Result<PathBu
     let srcdir = match name {
         "echo" => "echo",
         "fileio" => "fileio",
+        "parent" | "child" => "spawn",
         _ => "crt",
     };
     let src = root
@@ -228,6 +229,9 @@ pub fn run_conformance() -> crate::Result<()> {
     let crt = build_crt_exe(&vcvars, &root, "hello")?;
     let echo = build_crt_exe(&vcvars, &root, "echo")?;
     let fileio = build_crt_exe(&vcvars, &root, "fileio")?;
+    let parent = build_crt_exe(&vcvars, &root, "parent")?;
+    // child.exe is built beside parent.exe (same dir = the reference run's CWD).
+    let _child = build_crt_exe(&vcvars, &root, "child")?;
     run_case("ntdll", &hello, &["conformance"], b"", None)?;
     run_case("kernel32", &hello32, &["conformance32"], b"", None)?;
     run_case("heap", &heap, &["conformance_heap"], b"", None)?;
@@ -243,6 +247,9 @@ pub fn run_conformance() -> crate::Result<()> {
         b"",
         Some(("cat.txt", &cat)),
     )?;
+    // parent.exe CreateProcessA("child.exe") + Wait + GetExitCodeProcess; the TukOS
+    // initrd holds both exes (kernel/build.rs + fs.rs).
+    run_case("spawn", &parent, &["conformance_spawn"], b"", None)?;
     Ok(())
 }
 
