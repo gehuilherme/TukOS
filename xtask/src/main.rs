@@ -2,6 +2,7 @@ use std::process::ExitCode;
 
 mod conformance;
 mod disk;
+mod gdi32;
 mod image;
 mod kernel32;
 mod ktest;

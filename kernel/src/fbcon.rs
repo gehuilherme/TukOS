@@ -48,6 +48,60 @@ impl FbCon {
         unsafe { (self.base.add(y * self.pitch + x * 4) as *mut u32).write_volatile(rgb) };
     }
 
+    /// Writes a raw 0x00RRGGBB pixel; callers guarantee `x < width && y < height`.
+    fn put_raw(&mut self, x: usize, y: usize, rgb: u32) {
+        debug_assert!(x < self.width && y < self.height);
+        unsafe { (self.base.add(y * self.pitch + x * 4) as *mut u32).write_volatile(rgb) };
+    }
+
+    /// Fills a rectangle, clamped to the framebuffer (no overflow, no OOB writes).
+    pub fn fill_rect(&mut self, x: u32, y: u32, w: u32, h: u32, color: u32) {
+        let (x, y) = (x as usize, y as usize);
+        if x >= self.width || y >= self.height {
+            return;
+        }
+        let x1 = x.saturating_add(w as usize).min(self.width);
+        let y1 = y.saturating_add(h as usize).min(self.height);
+        for yy in y..y1 {
+            for xx in x..x1 {
+                self.put_raw(xx, yy, color & 0x00FF_FFFF);
+            }
+        }
+    }
+
+    /// Draws ASCII `bytes` at pixel (x, y), blending `bg` to `fg` by glyph
+    /// intensity; every pixel is clamped to the framebuffer.
+    pub fn text_out(&mut self, x: u32, y: u32, bytes: &[u8], fg: u32, bg: u32) {
+        let (cw, ch) = (Self::cell_width(), Self::cell_height());
+        for (i, &b) in bytes.iter().enumerate() {
+            let c = if (0x20..0x7F).contains(&b) {
+                b as char
+            } else {
+                '?'
+            };
+            let glyph = get_raster(c, WEIGHT, HEIGHT)
+                .or_else(|| get_raster('?', WEIGHT, HEIGHT))
+                .expect("'?' existe na fonte");
+            let x0 = (x as usize).saturating_add(i.saturating_mul(cw));
+            if x0 >= self.width {
+                break;
+            }
+            for (gy, line) in glyph.raster().iter().enumerate().take(ch) {
+                let py = (y as usize).saturating_add(gy);
+                if py >= self.height {
+                    break;
+                }
+                for (gx, &v) in line.iter().enumerate() {
+                    let px = x0.saturating_add(gx);
+                    if px >= self.width {
+                        break;
+                    }
+                    self.put_raw(px, py, blend(fg, bg, v));
+                }
+            }
+        }
+    }
+
     pub fn clear(&mut self) {
         unsafe { core::ptr::write_bytes(self.base, 0, self.pitch * self.height) };
         self.col = 0;
@@ -109,6 +163,47 @@ impl fmt::Write for FbCon {
         FbCon::write_str(self, s);
         Ok(())
     }
+}
+
+/// Per-channel blend of `bg` towards `fg` by `t` (0..=255).
+fn blend(fg: u32, bg: u32, t: u8) -> u32 {
+    let t = t as u32;
+    let mut out = 0;
+    for shift in [0u32, 8, 16] {
+        let f = (fg >> shift) & 0xFF;
+        let b = (bg >> shift) & 0xFF;
+        out |= ((b * (255 - t) + f * t) / 255) << shift;
+    }
+    out
+}
+
+/// `(width, height, bpp)` of the console framebuffer (bpp is always 32).
+pub fn fb_info() -> Option<(u32, u32, u32)> {
+    FBCON
+        .lock()
+        .as_ref()
+        .map(|c| (c.width as u32, c.height as u32, 32))
+}
+
+pub fn fill_rect(x: u32, y: u32, w: u32, h: u32, color: u32) {
+    if let Some(con) = FBCON.lock().as_mut() {
+        con.fill_rect(x, y, w, h, color);
+    }
+}
+
+pub fn text_out(x: u32, y: u32, bytes: &[u8], fg: u32, bg: u32) {
+    if let Some(con) = FBCON.lock().as_mut() {
+        con.text_out(x, y, bytes, fg, bg);
+    }
+}
+
+/// Bounds-checked pixel read (0x00RRGGBB), `None` outside the framebuffer.
+#[cfg_attr(not(feature = "ktest"), allow(dead_code))]
+pub fn pixel(x: u32, y: u32) -> Option<u32> {
+    let g = FBCON.lock();
+    let con = g.as_ref()?;
+    ((x as usize) < con.width && (y as usize) < con.height)
+        .then(|| con.pixel(x as usize, y as usize) & 0x00FF_FFFF)
 }
 
 pub fn init_from_limine() {

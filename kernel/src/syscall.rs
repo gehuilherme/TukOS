@@ -27,6 +27,14 @@ pub const NT_CREATE_PROCESS: u64 = 11;
 pub const NT_WAIT: u64 = 12;
 /// `(process_handle, out_u32_ptr)`; writes the exit code or STILL_ACTIVE (259).
 pub const NT_QUERY_EXIT_CODE: u64 = 13;
+/// `(out_fbinfo_ptr)`: writes `FbInfo { width, height, bpp }` (3 x u32).
+pub const NT_GDI_GET_FB_INFO: u64 = 14;
+/// `(x, y, w, h, color_argb)`; color on the user stack.
+pub const NT_GDI_FILL_RECT: u64 = 15;
+/// `(x, y, str_ptr, len, fg, bg)`; fg/bg on the user stack.
+pub const NT_GDI_TEXT_OUT: u64 = 16;
+/// Max bytes accepted by NtGdiTextOut.
+const GDI_TEXT_MAX: u64 = 4096;
 #[cfg(feature = "ktest")]
 pub const SYS_SUM6: u64 = 100;
 pub const STATUS_SUCCESS: u64 = 0;
@@ -566,6 +574,35 @@ fn nt_free_virtual_memory(process: u64, base_ptr: u64, size_ptr: u64, free_type:
     STATUS_SUCCESS
 }
 
+fn nt_gdi_get_fb_info(out: u64) -> u64 {
+    let Some((w, h, bpp)) = crate::fbcon::fb_info() else {
+        return STATUS_UNSUCCESSFUL;
+    };
+    let mut buf = [0u8; 12];
+    buf[0..4].copy_from_slice(&w.to_le_bytes());
+    buf[4..8].copy_from_slice(&h.to_le_bytes());
+    buf[8..12].copy_from_slice(&bpp.to_le_bytes());
+    if crate::usercopy::copy_to_user(out, &buf) {
+        STATUS_SUCCESS
+    } else {
+        STATUS_ACCESS_VIOLATION
+    }
+}
+
+fn nt_gdi_text_out(x: u64, y: u64, ptr: u64, len: u64, fg: u64, bg: u64) -> u64 {
+    let len = (len as u32 as u64).min(GDI_TEXT_MAX);
+    let bytes = if len == 0 {
+        alloc::vec::Vec::new()
+    } else {
+        match crate::usercopy::copy_from_user(ptr, len) {
+            Some(b) => b,
+            None => return STATUS_ACCESS_VIOLATION,
+        }
+    };
+    crate::fbcon::text_out(x as u32, y as u32, &bytes, fg as u32, bg as u32);
+    STATUS_SUCCESS
+}
+
 pub extern "C" fn dispatch(nr: u64, a0: u64, a1: u64, a2: u64, _a3: u64, _user_rsp: u64) -> u64 {
     match nr {
         SYS_WRITE_MARK => {
@@ -618,6 +655,20 @@ pub extern "C" fn dispatch(nr: u64, a0: u64, a1: u64, a2: u64, _a3: u64, _user_r
                 return STATUS_ACCESS_VIOLATION;
             };
             nt_create_process(a0, a1, a2, _a3, cmd_len)
+        }
+        NT_GDI_GET_FB_INFO => nt_gdi_get_fb_info(a0),
+        NT_GDI_FILL_RECT => {
+            let Some(color) = stack_arg(_user_rsp, 0) else {
+                return STATUS_ACCESS_VIOLATION;
+            };
+            crate::fbcon::fill_rect(a0 as u32, a1 as u32, a2 as u32, _a3 as u32, color as u32);
+            STATUS_SUCCESS
+        }
+        NT_GDI_TEXT_OUT => {
+            let (Some(fg), Some(bg)) = (stack_arg(_user_rsp, 0), stack_arg(_user_rsp, 1)) else {
+                return STATUS_ACCESS_VIOLATION;
+            };
+            nt_gdi_text_out(a0, a1, a2, _a3, fg, bg)
         }
         NT_WAIT => nt_wait(a0),
         NT_QUERY_EXIT_CODE => nt_query_exit_code(a0, a1),

@@ -194,6 +194,26 @@ pub extern "system" fn NtTukosQueryExitCode() {
     core::arch::naked_asm!("mov r10, rcx", "mov eax, 13", "syscall", "ret");
 }
 
+// GDI extensions (NT_GDI_GET_FB_INFO = 14, NT_GDI_FILL_RECT = 15, NT_GDI_TEXT_OUT = 16);
+// arg layouts documented in kernel/src/syscall.rs.
+#[unsafe(naked)]
+#[unsafe(no_mangle)]
+pub extern "system" fn NtGdiGetFbInfo() {
+    core::arch::naked_asm!("mov r10, rcx", "mov eax, 14", "syscall", "ret");
+}
+
+#[unsafe(naked)]
+#[unsafe(no_mangle)]
+pub extern "system" fn NtGdiFillRect() {
+    core::arch::naked_asm!("mov r10, rcx", "mov eax, 15", "syscall", "ret");
+}
+
+#[unsafe(naked)]
+#[unsafe(no_mangle)]
+pub extern "system" fn NtGdiTextOut() {
+    core::arch::naked_asm!("mov r10, rcx", "mov eax, 16", "syscall", "ret");
+}
+
 /// `RtlExitUserProcess(code)`: a real function (NOT a bare forwarder to the
 /// 2-arg `NtTerminateProcess`) that terminates the current process with `code`.
 #[unsafe(no_mangle)]

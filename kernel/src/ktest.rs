@@ -16,6 +16,7 @@ const TESTS: &[(&str, TestFn)] = &[
     ("idt_loaded", idt_loaded),
     ("breakpoint_returns", breakpoint_returns),
     ("fbcon_draws_glyph", fbcon_draws_glyph),
+    ("fb_fill_and_read", fb_fill_and_read),
     ("frame_alloc_roundtrip", frame_alloc_roundtrip),
     ("map_translate_unmap", map_translate_unmap),
     ("map_creates_missing_tables", map_creates_missing_tables),
@@ -1264,6 +1265,53 @@ fn fbcon_draws_glyph() -> Result<(), &'static str> {
         return Err("glifo nao foi desenhado");
     }
     con.clear();
+    Ok(())
+}
+
+fn fb_fill_and_read() -> Result<(), &'static str> {
+    use crate::fbcon::{fb_info, fill_rect, pixel, text_out};
+    let (w, h, bpp) = fb_info().ok_or("sem framebuffer")?;
+    if bpp != 32 || w < 64 || h < 64 {
+        return Err("fb_info inesperado");
+    }
+    let color = 0x00AB_CDEF;
+    fill_rect(10, 10, 5, 5, color);
+    if pixel(10, 10) != Some(color) || pixel(14, 14) != Some(color) {
+        return Err("rect nao preenchido");
+    }
+    if pixel(15, 15) == Some(color) || pixel(9, 9) == Some(color) {
+        return Err("rect vazou para fora");
+    }
+    // Clamp: rect beyond the right/bottom edge (and a huge one) must not fault.
+    fill_rect(w - 2, h - 2, 100, 100, color);
+    fill_rect(0, 0, u32::MAX, u32::MAX, 0x0011_2233);
+    fill_rect(w - 1, h - 1, u32::MAX, u32::MAX, color);
+    if pixel(w - 1, h - 1) != Some(color) {
+        return Err("canto final nao preenchido");
+    }
+    // Fully off-screen rect writes nothing and is not readable.
+    fill_rect(w + 5, 0, 10, 10, 0x00FF_0000);
+    fill_rect(0, h, 10, 10, 0x00FF_0000);
+    fill_rect(u32::MAX, u32::MAX, u32::MAX, u32::MAX, 0x00FF_0000);
+    if pixel(w, 0).is_some() || pixel(0, h).is_some() {
+        return Err("pixel fora do fb legivel");
+    }
+    // Text partly/fully off-screen must clamp too.
+    text_out(w - 3, h - 3, b"AB", 0x00FF_FFFF, 0);
+    text_out(w + 10, h + 10, b"AB", 0x00FF_FFFF, 0);
+    text_out(5, 5, b"Hi", 0x00FF_FFFF, 0x0000_0000);
+    let mut lit = false;
+    for y in 5..21 {
+        for x in 5..21 {
+            lit |= pixel(x, y).is_some_and(|p| p != 0);
+        }
+    }
+    if !lit {
+        return Err("texto nao desenhado");
+    }
+    if let Some(con) = crate::fbcon::FBCON.lock().as_mut() {
+        con.clear();
+    }
     Ok(())
 }
 
