@@ -167,6 +167,8 @@ const TESTS: &[(&str, TestFn)] = &[
     ("valloc_basic", valloc_basic),
     ("valloc_rejects_overlap", valloc_rejects_overlap),
     ("valloc_rejects_kernel_range", valloc_rejects_kernel_range),
+    // Deve ser o ULTIMO: esgota a tabela de threads (Plan 18 Task 1).
+    ("thread_slots_exhaust", thread_slots_exhaust),
 ];
 
 static SURVIVOR_RAN: AtomicU64 = AtomicU64::new(0);
@@ -2247,4 +2249,68 @@ fn single_thread_after_exit_no_fault() -> Result<(), &'static str> {
         return Err("frames mudaram apos yields com thread unica");
     }
     Ok(())
+}
+
+static SLOT_CHILD_DONE: AtomicU64 = AtomicU64::new(0);
+
+fn slot_child() {
+    SLOT_CHILD_DONE.fetch_add(1, Ordering::SeqCst);
+    crate::sched::exit_current();
+}
+
+/// Reproducer for docs/observations/2026-10-14-thread-slot-exhaustion.md.
+/// Spawns ONE short-lived kernel thread at a time, waits for it to exit and be
+/// reaped (frames back to baseline), up to 80 times. Today the Exited slots are
+/// never reclaimed, so the thread table runs out after MAX_THREADS - (slots
+/// already used) spawns although frames are at baseline every time. This test
+/// asserts the CURRENT (buggy) behaviour so the suite stays green; Plan 18
+/// Task 2 inverts it into the regression (all 80 spawns must succeed).
+fn thread_slots_exhaust() -> Result<(), &'static str> {
+    for _ in 0..100 {
+        crate::sched::yield_now();
+    }
+    let baseline = crate::mem::frames::free_frame_count();
+    let (used0, max) = crate::sched::slot_usage_for_test();
+    let mut failed_at: Option<usize> = None;
+    for i in 0..80usize {
+        if !crate::sched::has_thread_capacity() {
+            failed_at = Some(i);
+            break;
+        }
+        let n = SLOT_CHILD_DONE.load(Ordering::SeqCst);
+        crate::sched::spawn(slot_child);
+        let mut done = false;
+        for _ in 0..2000 {
+            crate::sched::yield_now();
+            if SLOT_CHILD_DONE.load(Ordering::SeqCst) > n {
+                done = true;
+                break;
+            }
+        }
+        if !done {
+            return Err("filho nao executou");
+        }
+        for _ in 0..50 {
+            crate::sched::yield_now();
+        }
+        if crate::mem::frames::free_frame_count() != baseline {
+            return Err("frames nao voltaram a baseline apos reap");
+        }
+    }
+    let (used1, _) = crate::sched::slot_usage_for_test();
+    crate::kprintln!(
+        "thread_slots_exhaust: slots_usados_inicio={} max={} falhou_na_iteracao={:?} slots_usados_fim={} frames_baseline={} frames_agora={}",
+        used0,
+        max,
+        failed_at,
+        used1,
+        baseline,
+        crate::mem::frames::free_frame_count()
+    );
+    match failed_at {
+        // Bug atual: spawn falha apos esgotar slots, com frames na baseline.
+        Some(i) if i == max - used0 && crate::mem::frames::free_frame_count() == baseline => Ok(()),
+        Some(_) => Err("falha em iteracao inesperada"),
+        None => Err("spawn nunca falhou (bug corrigido? inverta este teste)"),
+    }
 }

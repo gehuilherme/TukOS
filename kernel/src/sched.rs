@@ -148,6 +148,13 @@ pub fn spawn_user(
         .expect("sched: limite de threads atingido")
 }
 
+/// Test-only: (slots in use in the table, MAX_THREADS).
+#[cfg(feature = "ktest")]
+pub fn slot_usage_for_test() -> (usize, usize) {
+    let guard = SCHED.lock();
+    (guard.as_ref().map_or(0, |s| s.threads.len()), MAX_THREADS)
+}
+
 /// True if the thread table has room for one more thread.
 pub fn has_thread_capacity() -> bool {
     SCHED
