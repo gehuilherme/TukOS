@@ -1254,6 +1254,92 @@ pub fn build_exe_exit_code_2a() -> alloc::vec::Vec<u8> {
     })
 }
 
+/// Test parent `.exe` (kernel32 only): `CreateProcessA("C:\test\exit42.exe")`,
+/// `WaitForSingleObject(hProcess, INFINITE)`, `GetExitCodeProcess`, `CloseHandle`, then
+/// `ExitProcess(childCode + 0x1000)`. Any failed check (or a zero pid) exits 0xBAD.
+#[cfg(feature = "ktest")]
+pub fn build_exe_spawns_child() -> alloc::vec::Vec<u8> {
+    build_import_exe(
+        "kernel32.dll",
+        &[
+            "CreateProcessA",
+            "WaitForSingleObject",
+            "GetExitCodeProcess",
+            "CloseHandle",
+            "ExitProcess",
+        ],
+        None,
+        None,
+        |slot, _| {
+            use alloc::vec::Vec;
+            let mut c: Vec<u8> = Vec::new();
+            let mut fails: Vec<usize> = Vec::new();
+            // Frame: args @0x20..0x50, STARTUPINFOA @0x60 (104), PROCESS_INFORMATION @0xC8,
+            // exit code @0xE0.
+            c.extend_from_slice(&[0x48, 0x81, 0xEC, 0x08, 0x01, 0, 0]); // sub rsp, 0x108
+            c.extend_from_slice(&[0x48, 0x8D, 0x0D]); // lea rcx,[rip+path] (patched)
+            let lea_at = c.len();
+            c.extend_from_slice(&[0, 0, 0, 0]);
+            c.extend_from_slice(&[0x31, 0xD2]); // xor edx, edx (lpCommandLine)
+            c.extend_from_slice(&[0x45, 0x31, 0xC0]); // xor r8d, r8d
+            c.extend_from_slice(&[0x45, 0x31, 0xC9]); // xor r9d, r9d
+            for off in [0x20u8, 0x28, 0x30, 0x38] {
+                c.extend_from_slice(&[0x48, 0xC7, 0x44, 0x24, off, 0, 0, 0, 0]);
+            }
+            c.extend_from_slice(&[0x48, 0x8D, 0x44, 0x24, 0x60]); // lea rax,[rsp+0x60]
+            c.extend_from_slice(&[0x48, 0x89, 0x44, 0x24, 0x40]); // [rsp+0x40] = &si
+            c.extend_from_slice(&[0x48, 0x8D, 0x84, 0x24, 0xC8, 0, 0, 0]); // lea rax,[rsp+0xC8]
+            c.extend_from_slice(&[0x48, 0x89, 0x44, 0x24, 0x48]); // [rsp+0x48] = &pi
+            c.extend_from_slice(&[0xBB, 1, 0, 0, 0]); // mov ebx, step
+            rip_rel_to(&mut c, &[0xFF, 0x15], slot[0]); // call [CreateProcessA]
+            c.extend_from_slice(&[0x85, 0xC0]); // test eax, eax
+            c.extend_from_slice(&[0x0F, 0x84, 0, 0, 0, 0]); // je fail
+            fails.push(c.len() - 4);
+            c.extend_from_slice(&[0xBB, 0, 0, 0, 0]); // mov ebx, 0 (pid check)
+            c.extend_from_slice(&[0x83, 0xBC, 0x24, 0xD8, 0, 0, 0, 0]); // cmp dword [pi.pid], 0
+            c.extend_from_slice(&[0x0F, 0x84, 0, 0, 0, 0]); // je fail
+            fails.push(c.len() - 4);
+            c.extend_from_slice(&[0x48, 0x8B, 0x8C, 0x24, 0xC8, 0, 0, 0]); // mov rcx,[pi.hProcess]
+            c.extend_from_slice(&[0xBA, 0xFF, 0xFF, 0xFF, 0xFF]); // mov edx, INFINITE
+            c.extend_from_slice(&[0xBB, 2, 0, 0, 0]); // mov ebx, step
+            rip_rel_to(&mut c, &[0xFF, 0x15], slot[1]); // call [WaitForSingleObject]
+            c.extend_from_slice(&[0x85, 0xC0]); // test eax, eax (WAIT_OBJECT_0)
+            c.extend_from_slice(&[0x0F, 0x85, 0, 0, 0, 0]); // jne fail
+            fails.push(c.len() - 4);
+            c.extend_from_slice(&[0x48, 0x8B, 0x8C, 0x24, 0xC8, 0, 0, 0]); // mov rcx,[pi.hProcess]
+            c.extend_from_slice(&[0x48, 0x8D, 0x94, 0x24, 0xE0, 0, 0, 0]); // lea rdx,[rsp+0xE0]
+            c.extend_from_slice(&[0xBB, 3, 0, 0, 0]); // mov ebx, step
+            rip_rel_to(&mut c, &[0xFF, 0x15], slot[2]); // call [GetExitCodeProcess]
+            c.extend_from_slice(&[0x85, 0xC0]);
+            c.extend_from_slice(&[0x0F, 0x84, 0, 0, 0, 0]); // je fail
+            fails.push(c.len() - 4);
+            c.extend_from_slice(&[0x48, 0x8B, 0x8C, 0x24, 0xC8, 0, 0, 0]); // mov rcx,[pi.hProcess]
+            c.extend_from_slice(&[0xBB, 4, 0, 0, 0]); // mov ebx, step
+            rip_rel_to(&mut c, &[0xFF, 0x15], slot[3]); // call [CloseHandle]
+            c.extend_from_slice(&[0x85, 0xC0]);
+            c.extend_from_slice(&[0x0F, 0x84, 0, 0, 0, 0]); // je fail
+            fails.push(c.len() - 4);
+            c.extend_from_slice(&[0x8B, 0x8C, 0x24, 0xE0, 0, 0, 0]); // mov ecx,[code]
+            c.extend_from_slice(&[0x81, 0xC1, 0x00, 0x10, 0, 0]); // add ecx, 0x1000
+            rip_rel_to(&mut c, &[0xFF, 0x15], slot[4]); // call [ExitProcess]
+            c.extend_from_slice(&[0x0F, 0x0B]);
+            let fail_pos = c.len();
+            c.extend_from_slice(&[0x8D, 0x8B, 0xD0, 0xBA, 0, 0]); // lea ecx,[rbx+0xBAD0]
+            rip_rel_to(&mut c, &[0xFF, 0x15], slot[4]);
+            c.extend_from_slice(&[0x0F, 0x0B]);
+            for f in fails {
+                let rel = fail_pos as i32 - (f as i32 + 4);
+                c[f..f + 4].copy_from_slice(&rel.to_le_bytes());
+            }
+            let path_pos = c.len();
+            c.extend_from_slice(b"C:\\test\\exit42.exe\0");
+            let rel = path_pos as i32 - (lea_at as i32 + 4);
+            c[lea_at..lea_at + 4].copy_from_slice(&rel.to_le_bytes());
+            c
+        },
+    )
+}
+
 /// Test `.exe` importing a DLL (`user32.dll`) that is not loaded in the process.
 pub fn build_exe_importing_missing_dll() -> alloc::vec::Vec<u8> {
     build_import_exe("user32.dll", &["MessageBoxA"], None, None, |_, _| {

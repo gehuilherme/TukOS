@@ -129,6 +129,7 @@ const TESTS: &[(&str, TestFn)] = &[
     ("kernel32_exports_crt_surface", kernel32_exports_crt_surface),
     ("crt_hello_runs", crt_hello_runs),
     ("program_reads_file", program_reads_file),
+    ("program_spawns_child", program_spawns_child),
     ("echo_reads_and_prints", echo_reads_and_prints),
     ("two_modules_no_overlap", two_modules_no_overlap),
     (
@@ -1617,6 +1618,45 @@ fn program_reads_file() -> Result<(), &'static str> {
         }
     }
     Err("program_reads_file: o exe nao terminou/foi recolhido")
+}
+
+/// End to end: a Ring-3 parent calls kernel32!CreateProcessA("C:\test\exit42.exe"),
+/// WaitForSingleObject(INFINITE), GetExitCodeProcess, CloseHandle and exits with
+/// `childCode + 0x1000`. The child exits 0x2A first, so the last terminate status must
+/// be 0x102A (0xBAD = a wrapper failed); both are reaped (frames back to baseline).
+fn program_spawns_child() -> Result<(), &'static str> {
+    use core::sync::atomic::Ordering;
+    if !have_both_dlls() {
+        return Ok(()); // ntdll/kernel32 not embedded on this host: skip.
+    }
+    crate::fs::register_test_file(
+        "test/exit42.exe",
+        crate::process::build_exe_exit_code_2a().leak(),
+    );
+    crate::syscall::LAST_TERMINATE_STATUS.store(u64::MAX, Ordering::SeqCst);
+    let before = crate::mem::frames::free_frame_count();
+    crate::process::spawn_exe_image_with_k32(crate::process::build_exe_spawns_child());
+    for _ in 0..80000 {
+        crate::sched::yield_now();
+        let st = crate::syscall::LAST_TERMINATE_STATUS.load(Ordering::SeqCst);
+        if (0xBAD0..0xBAE0).contains(&st) {
+            return Err(match st - 0xBAD0 {
+                0 => "program_spawns_child: pid sintetico zero",
+                1 => "program_spawns_child: CreateProcessA falhou",
+                2 => "program_spawns_child: WaitForSingleObject falhou",
+                3 => "program_spawns_child: GetExitCodeProcess falhou",
+                _ => "program_spawns_child: CloseHandle falhou",
+            });
+        }
+        if st == 0x102A {
+            if crate::mem::frames::free_frame_count() == before {
+                return Ok(());
+            }
+        } else if st != u64::MAX && st != 0x2A {
+            return Err("program_spawns_child: status final inesperado");
+        }
+    }
+    Err("program_spawns_child: pai/filho nao terminaram ou frames vazaram")
 }
 
 fn heap_alloc_write_free() -> Result<(), &'static str> {

@@ -139,6 +139,10 @@ unsafe extern "system" {
     ) -> i32;
     fn NtTukosSetFilePointer(handle: isize, dist: i64, method: u32, out_new: *mut u64) -> i32;
     fn NtTukosQueryFileSize(handle: isize, out_size: *mut u64) -> i32;
+    // TukOS process extensions (kernel/src/syscall.rs NT_CREATE_PROCESS/NT_WAIT/NT_QUERY_EXIT_CODE).
+    fn NtTukosCreateProcess(path: *const u16, path_bytes: u32, out_process: *mut isize) -> i32;
+    fn NtTukosWait(process: isize) -> i32;
+    fn NtTukosQueryExitCode(process: isize, out_code: *mut u32) -> i32;
     fn NtTerminateProcess(process: isize, status: i32) -> i32;
     fn NtClose(handle: isize) -> i32;
     fn RtlGetProcessHeap() -> *mut c_void;
@@ -1071,6 +1075,133 @@ pub unsafe extern "system" fn CreateFileW(
     }
     h
 }
+/// Synthetic process/thread id source for `CreateProcessA` (the kernel has no pids yet).
+static NEXT_SYNTH_ID: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0x100);
+
+const ERROR_NOT_ENOUGH_MEMORY_PROC: u32 = 8;
+const STATUS_INSUFFICIENT_RESOURCES: i32 = 0xC000_009Au32 as i32;
+const WAIT_OBJECT_0: u32 = 0;
+const WAIT_FAILED: u32 = 0xFFFF_FFFF;
+
+/// `CreateProcessA` [real, staged]: runs an initrd `.exe` as a new process through
+/// `NtTukosCreateProcess`. The program is `lpApplicationName` when non-null, else the
+/// first token of `lpCommandLine` (up to the first space/tab, or the quoted span if it
+/// starts with `"`). The ANSI bytes are widened to UTF-16LE (each byte -> one unit) into
+/// a bounded 260-unit stack buffer; longer -> ERROR_FILENAME_EXCED_RANGE. No `.exe`
+/// suffix or PATH search is added. `lpProcessInformation` (PROCESS_INFORMATION, 24
+/// bytes: hProcess@0, hThread@8, dwProcessId@16, dwThreadId@20) is written field by
+/// field: hProcess = the process handle, hThread = the same handle value (the kernel
+/// has no thread objects; do not CloseHandle both), ids = synthetic nonzero values from
+/// a per-process counter. Process/thread attributes, bInheritHandles, creation flags,
+/// environment, current directory and STARTUPINFOA are ignored: the child gets a fresh
+/// handle table with only the console. Missing file -> ERROR_FILE_NOT_FOUND.
+///
+/// # Safety
+/// Strings are null or NUL-terminated; `lpProcessInformation` is null or 24 writable bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn CreateProcessA(
+    app_name: *const u8,
+    cmd_line: *mut u8,
+    _proc_attrs: *const c_void,
+    _thread_attrs: *const c_void,
+    _inherit: i32,
+    _flags: u32,
+    _env: *const c_void,
+    _cwd: *const u8,
+    _startup_info: *const c_void,
+    proc_info: *mut u8,
+) -> i32 {
+    let (src, quoted_cmd) = if !app_name.is_null() {
+        (app_name, false)
+    } else if !cmd_line.is_null() {
+        (cmd_line as *const u8, true)
+    } else {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return 0;
+    };
+    let mut i = 0usize;
+    let mut quoted = false;
+    if quoted_cmd && unsafe { core::ptr::read_volatile(src) } == b'"' {
+        quoted = true;
+        i = 1;
+    }
+    let mut buf = [0u16; MAX_PATH_CHARS];
+    let mut n = 0usize;
+    loop {
+        let b = unsafe { core::ptr::read_volatile(src.add(i)) };
+        let end =
+            b == 0 || (quoted && b == b'"') || (quoted_cmd && !quoted && (b == b' ' || b == b'\t'));
+        if end {
+            break;
+        }
+        if n == MAX_PATH_CHARS {
+            SetLastError(ERROR_FILENAME_EXCED_RANGE);
+            return 0;
+        }
+        buf[n] = u16::from(b);
+        n += 1;
+        i += 1;
+    }
+    if n == 0 {
+        SetLastError(ERROR_FILE_NOT_FOUND);
+        return 0;
+    }
+    let mut h: isize = 0;
+    let st = unsafe { NtTukosCreateProcess(buf.as_ptr(), (n * 2) as u32, &mut h) };
+    if st < 0 {
+        SetLastError(match st {
+            STATUS_INSUFFICIENT_RESOURCES => ERROR_NOT_ENOUGH_MEMORY_PROC,
+            other => status_to_win32(other),
+        });
+        return 0;
+    }
+    if !proc_info.is_null() {
+        use core::sync::atomic::Ordering;
+        let pid = NEXT_SYNTH_ID.fetch_add(4, Ordering::Relaxed);
+        let tid = NEXT_SYNTH_ID.fetch_add(4, Ordering::Relaxed);
+        unsafe {
+            core::ptr::write_unaligned(proc_info as *mut isize, h); // hProcess @0
+            core::ptr::write_unaligned(proc_info.add(8) as *mut isize, h); // hThread @8
+            core::ptr::write_unaligned(proc_info.add(16) as *mut u32, pid); // dwProcessId @16
+            core::ptr::write_unaligned(proc_info.add(20) as *mut u32, tid); // dwThreadId @20
+        }
+    }
+    1
+}
+
+/// `WaitForSingleObject` [real, staged]: only process handles are supported. Always
+/// blocks until the process exits (the timeout is ignored, i.e. every value behaves as
+/// INFINITE) and returns WAIT_OBJECT_0; a non-process handle -> WAIT_FAILED with
+/// ERROR_INVALID_HANDLE.
+#[unsafe(no_mangle)]
+pub extern "system" fn WaitForSingleObject(handle: isize, _millis: u32) -> u32 {
+    if unsafe { NtTukosWait(handle) } < 0 {
+        SetLastError(ERROR_INVALID_HANDLE);
+        return WAIT_FAILED;
+    }
+    WAIT_OBJECT_0
+}
+
+/// `GetExitCodeProcess` [real]: the exit code of the process, or STILL_ACTIVE (259) if
+/// it has not exited. FALSE with ERROR_INVALID_HANDLE for a non-process handle.
+///
+/// # Safety
+/// `code` is null or a writable u32.
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn GetExitCodeProcess(handle: isize, code: *mut u32) -> i32 {
+    let mut v = 0u32;
+    if unsafe { NtTukosQueryExitCode(handle, &mut v) } < 0 {
+        SetLastError(ERROR_INVALID_HANDLE);
+        return 0;
+    }
+    if code.is_null() {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return 0;
+    }
+    unsafe { core::ptr::write_unaligned(code, v) };
+    1
+}
+
 /// `FindFirstFileExW` [stub, cold]: INVALID_HANDLE_VALUE + ERROR_FILE_NOT_FOUND.
 #[unsafe(no_mangle)]
 pub extern "system" fn FindFirstFileExW(
