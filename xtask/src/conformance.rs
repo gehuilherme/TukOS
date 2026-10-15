@@ -140,23 +140,25 @@ pub fn build_gui_test(root: &Path) -> crate::Result<()> {
     };
     let outdir = root.join("target").join("conformance").join("gui");
     std::fs::create_dir_all(&outdir).map_err(|e| e.to_string())?;
-    let src = root.join("gui").join("test_win").join("test_win.c");
-    let bat = outdir.join("build-test_win.bat");
-    let script = format!(
-        "@echo off\r\n\
-         call \"{vcvars}\" >nul || exit /b 1\r\n\
-         cd /d \"{outdir}\" || exit /b 1\r\n\
-         cl /nologo /MT /GS- \"{src}\" /link /nologo user32.lib gdi32.lib /OUT:test_win.exe || exit /b 1\r\n",
-        vcvars = vcvars.display(),
-        outdir = outdir.display(),
-        src = src.display(),
-    );
-    std::fs::write(&bat, script).map_err(|e| e.to_string())?;
-    run(Command::new("cmd").arg("/C").arg(&bat))?;
-    let exe = outdir.join("test_win.exe");
-    exe.is_file()
-        .then_some(())
-        .ok_or_else(|| "test_win.exe nao foi gerado".to_string())
+    for name in ["test_win", "hello_win"] {
+        let src = root.join("gui").join(name).join(format!("{name}.c"));
+        let bat = outdir.join(format!("build-{name}.bat"));
+        let script = format!(
+            "@echo off\r\n\
+             call \"{vcvars}\" >nul || exit /b 1\r\n\
+             cd /d \"{outdir}\" || exit /b 1\r\n\
+             cl /nologo /MT /GS- \"{src}\" /link /nologo user32.lib gdi32.lib /OUT:{name}.exe || exit /b 1\r\n",
+            vcvars = vcvars.display(),
+            outdir = outdir.display(),
+            src = src.display(),
+        );
+        std::fs::write(&bat, script).map_err(|e| e.to_string())?;
+        run(Command::new("cmd").arg("/C").arg(&bat))?;
+        if !outdir.join(format!("{name}.exe")).is_file() {
+            return Err(format!("{name}.exe nao foi gerado"));
+        }
+    }
+    Ok(())
 }
 
 /// One case: run `exe` on the real Windows, boot the kernel built with `features`, compare.

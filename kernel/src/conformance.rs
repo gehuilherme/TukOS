@@ -23,9 +23,13 @@ static CONFORMANCE_EXE: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/confor
     not(feature = "conformance_echo"),
     not(feature = "conformance_fileio"),
     not(feature = "conformance_spawn"),
-    not(feature = "shell")
+    not(feature = "shell"),
+    not(feature = "gui")
 ))]
 static CONFORMANCE_EXE: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/crt_hello.exe"));
+/// With `gui` the program is the GUI demo hello_win.exe (user32/gdi32), run by `spawn_exe_image_with_gui`.
+#[cfg(feature = "gui")]
+static CONFORMANCE_EXE: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/hello_win.exe"));
 /// With `shell` the program is the `/MT` shell.exe (reads commands from the keyboard).
 #[cfg(feature = "shell")]
 static CONFORMANCE_EXE: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/shell.exe"));
@@ -53,9 +57,18 @@ pub fn run() -> ! {
     crate::syscall::LAST_TERMINATE_STATUS.store(u64::MAX, core::sync::atomic::Ordering::SeqCst);
     let before = crate::mem::frames::free_frame_count();
     kprintln!("@@TUKOS-CONFORMANCE-BEGIN");
+    #[cfg(feature = "gui")]
+    if crate::process::spawn_exe_image_with_gui(CONFORMANCE_EXE.to_vec(), None).is_err() {
+        kprintln!("@@TUKOS-PANIC gui: spawn falhou (DLLs/exe nao embutidos?)");
+        crate::qemu::exit(crate::qemu::ExitCode::Failure);
+    }
     #[cfg(not(feature = "conformance32"))]
     crate::process::spawn_exe_image_with_ntdll(CONFORMANCE_EXE.to_vec());
-    #[cfg(all(feature = "conformance32", not(feature = "conformance_echo")))]
+    #[cfg(all(
+        feature = "conformance32",
+        not(feature = "conformance_echo"),
+        not(feature = "gui")
+    ))]
     crate::process::spawn_exe_image_with_k32(CONFORMANCE_EXE.to_vec());
     #[cfg(feature = "conformance_echo")]
     {
@@ -76,6 +89,13 @@ pub fn run() -> ! {
             let st =
                 crate::syscall::LAST_TERMINATE_STATUS.load(core::sync::atomic::Ordering::SeqCst);
             kprintln!("@@TUKOS-CONFORMANCE-EXIT {}", st as u32 as i32);
+            // GUI demo: keep the painted window on screen for the human (no exit).
+            #[cfg(feature = "gui")]
+            loop {
+                crate::sched::yield_now();
+                core::hint::spin_loop();
+            }
+            #[cfg(not(feature = "gui"))]
             crate::qemu::exit(crate::qemu::ExitCode::Success);
         }
     }

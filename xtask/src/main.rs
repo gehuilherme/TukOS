@@ -14,18 +14,27 @@ mod vmware;
 
 pub type Result<T> = std::result::Result<T, String>;
 
-const USAGE: &str =
-    "uso: cargo xtask <build|run|ktest|test|vmware|ntdll|kernel32|gdi32|user32|conformance>";
+const USAGE: &str = "uso: cargo xtask <build|run [gui]|vmware [gui]|ktest|test|ntdll|kernel32|gdi32|user32|conformance>";
+
+/// Boot mode for `run`/`vmware`: `shell` (default) or `gui` (`cargo xtask run gui`:
+/// the hello_win Win32 GUI demo is the initial process).
+fn boot_feature(args: &[String]) -> &'static str {
+    if args.get(1).map(String::as_str) == Some("gui") {
+        "gui"
+    } else {
+        "shell"
+    }
+}
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let result: Result<()> = match args.first().map(String::as_str) {
         Some("build") => image::build(&[]).map(|esp| println!("ESP pronta em {}", esp.display())),
         Some("run") => conformance::build_shell_programs()
-            .and_then(|()| image::build(&["shell"]))
+            .and_then(|()| image::build(&[boot_feature(&args)]))
             .and_then(|esp| qemu::run_interactive(&esp)),
         Some("vmware") => conformance::build_shell_programs()
-            .and_then(|()| image::build(&["shell"]))
+            .and_then(|()| image::build(&[boot_feature(&args)]))
             .and_then(|esp| vmware::run_interactive(&esp)),
         Some("ktest") => ktest::run_all(),
         Some("conformance") => conformance::run_conformance(),

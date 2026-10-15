@@ -135,6 +135,7 @@ const TESTS: &[(&str, TestFn)] = &[
     ("program_spawns_child", program_spawns_child),
     ("echo_reads_and_prints", echo_reads_and_prints),
     ("window_paints", window_paints),
+    ("gui_hello_window", gui_hello_window),
     ("shell_runs_command", shell_runs_command),
     ("shell_unknown_and_help", shell_unknown_and_help),
     ("shell_echo_args", shell_echo_args),
@@ -510,6 +511,70 @@ fn window_paints() -> Result<(), &'static str> {
         }
     }
     Err("window_paints nao terminou/recolheu os frames")
+}
+
+/// The GUI demo (target/conformance/gui/hello_win.exe; empty if not built).
+static HELLO_WIN_EXE: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/hello_win.exe"));
+
+/// hello_win paints a rect RGB(0,120,215) = framebuffer 0x000078D7 at (10,10)-(200,60)
+/// and white (0x00FFFFFF) "Hello, TukOS!" at (20,25) over it (see gui/hello_win/hello_win.c).
+const HELLO_RECT: u32 = 0x0000_78D7;
+/// Glyphs are anti-aliased, so a stem pixel is white blended over the rect colour; the
+/// rect's red channel is 0, so a red channel above this proves white text ink.
+const HELLO_TEXT_MIN_RED: u32 = 0x80;
+
+/// Real Win32 GUI demo end to end: rect AND TextOut text land in the framebuffer.
+fn gui_hello_window() -> Result<(), &'static str> {
+    use core::sync::atomic::Ordering;
+    if !crate::process::have_gui_dlls() || HELLO_WIN_EXE.is_empty() {
+        return Ok(()); // DLLs/hello_win.exe not embedded on this host: skip.
+    }
+    if let Some(con) = crate::fbcon::FBCON.lock().as_mut() {
+        con.clear();
+    }
+    crate::syscall::LAST_TERMINATE_STATUS.store(u64::MAX, Ordering::SeqCst);
+    let before = crate::mem::frames::free_frame_count();
+    crate::process::spawn_exe_image_with_gui(HELLO_WIN_EXE.to_vec(), None)
+        .map_err(|_| "gui_hello_window: spawn falhou")?;
+    for _ in 0..40000 {
+        crate::sched::yield_now();
+        let st = crate::syscall::LAST_TERMINATE_STATUS.load(Ordering::SeqCst);
+        if st != u64::MAX {
+            if (0xC000_7001..=0xC000_700A).contains(&st) {
+                crate::kprintln!("gui_hello_window: loader status {:#x}", st);
+                return Err("gui_hello_window: o loader morreu (import nao resolvido?)");
+            }
+            if st != 0 {
+                crate::kprintln!("gui_hello_window terminou com status {:#x}", st);
+                return Err("gui_hello_window: exit code != 0");
+            }
+            // A pixel in the rect, clear of the text box (x 20..150, y 25..45).
+            if crate::fbcon::pixel(180, 15) != Some(HELLO_RECT) {
+                return Err("gui_hello_window: pixel do retangulo errado");
+            }
+            // TextOut rendered: some pixel in the text box is the foreground colour.
+            let mut text_px = false;
+            for y in 25..45 {
+                for x in 20..150 {
+                    if crate::fbcon::pixel(x, y)
+                        .is_some_and(|p| (p >> 16) & 0xFF > HELLO_TEXT_MIN_RED)
+                    {
+                        text_px = true;
+                    }
+                }
+            }
+            if !text_px {
+                return Err("gui_hello_window: nenhum pixel do texto Hello, TukOS!");
+            }
+            if crate::mem::frames::free_frame_count() == before {
+                if let Some(con) = crate::fbcon::FBCON.lock().as_mut() {
+                    con.clear();
+                }
+                return Ok(());
+            }
+        }
+    }
+    Err("gui_hello_window nao terminou/recolheu os frames")
 }
 
 /// The `/MT` argv.exe (target/conformance/crt/argv.exe; empty if not built).
