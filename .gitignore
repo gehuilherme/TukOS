@@ -3,3 +3,9 @@
 design-desktop.pdf
 docs/design/
 target/conformance/
+
+# GUI survey/build artifacts (Plano 21)
+gui/**/*.exe
+gui/**/*.obj
+gui/**/*.pdb
+gui/**/*.ilk
