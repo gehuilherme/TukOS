@@ -926,6 +926,121 @@ pub fn build_exe_reads_stdin() -> alloc::vec::Vec<u8> {
     )
 }
 
+/// Test `.exe` (kernel32 only) that reads `C:\cat.txt` from the initrd: `CreateFileW`
+/// (GENERIC_READ, OPEN_EXISTING), checks `GetFileType == FILE_TYPE_DISK` and
+/// `GetFileSizeEx == 26`, then loops `ReadFile(32)` -> `WriteFile(stdout)` until a read
+/// returns 0 bytes, `CloseHandle`, `ExitProcess(0)`. Any failed check exits 0xBAD.
+/// The UTF-16 path lives in `.text` after the code.
+pub fn build_exe_reads_file() -> alloc::vec::Vec<u8> {
+    build_import_exe(
+        "kernel32.dll",
+        &[
+            "GetStdHandle",
+            "CreateFileW",
+            "GetFileType",
+            "GetFileSizeEx",
+            "ReadFile",
+            "WriteFile",
+            "CloseHandle",
+            "ExitProcess",
+        ],
+        None,
+        None,
+        |slot, _| {
+            use alloc::vec::Vec;
+            let mut c: Vec<u8> = Vec::new();
+            let mut fails: Vec<usize> = Vec::new();
+            c.extend_from_slice(&[0x48, 0x81, 0xEC, 0x88, 0, 0, 0]); // sub rsp, 0x88
+            // h = CreateFileW(path, GENERIC_READ, 1, 0, OPEN_EXISTING, 0x80, 0)
+            c.extend_from_slice(&[0x48, 0x8D, 0x0D]); // lea rcx,[rip+path] (patched)
+            let lea_at = c.len();
+            c.extend_from_slice(&[0, 0, 0, 0]);
+            c.extend_from_slice(&[0xBA, 0, 0, 0, 0x80]); // mov edx, 0x80000000
+            c.extend_from_slice(&[0x41, 0xB8, 1, 0, 0, 0]); // mov r8d, 1
+            c.extend_from_slice(&[0x45, 0x31, 0xC9]); // xor r9d, r9d
+            c.extend_from_slice(&[0x48, 0xC7, 0x44, 0x24, 0x20, 3, 0, 0, 0]); // [rsp+20]=3
+            c.extend_from_slice(&[0x48, 0xC7, 0x44, 0x24, 0x28, 0x80, 0, 0, 0]); // [rsp+28]=0x80
+            c.extend_from_slice(&[0x48, 0xC7, 0x44, 0x24, 0x30, 0, 0, 0, 0]); // [rsp+30]=0
+            rip_rel_to(&mut c, &[0xFF, 0x15], slot[1]); // call [CreateFileW]
+            c.extend_from_slice(&[0x48, 0x83, 0xF8, 0xFF]); // cmp rax, -1
+            c.extend_from_slice(&[0x0F, 0x84, 0, 0, 0, 0]); // je fail
+            fails.push(c.len() - 4);
+            c.extend_from_slice(&[0x48, 0x89, 0x44, 0x24, 0x40]); // mov [rsp+40], rax
+            // GetFileType(h) must be FILE_TYPE_DISK (1)
+            c.extend_from_slice(&[0x48, 0x89, 0xC1]); // mov rcx, rax
+            rip_rel_to(&mut c, &[0xFF, 0x15], slot[2]); // call [GetFileType]
+            c.extend_from_slice(&[0x83, 0xF8, 0x01]); // cmp eax, 1
+            c.extend_from_slice(&[0x0F, 0x85, 0, 0, 0, 0]); // jne fail
+            fails.push(c.len() - 4);
+            // GetFileSizeEx(h, &size @ [rsp+48]) must give 26
+            c.extend_from_slice(&[0x48, 0x8B, 0x4C, 0x24, 0x40]); // mov rcx, [rsp+40]
+            c.extend_from_slice(&[0x48, 0x8D, 0x54, 0x24, 0x48]); // lea rdx, [rsp+48]
+            rip_rel_to(&mut c, &[0xFF, 0x15], slot[3]); // call [GetFileSizeEx]
+            c.extend_from_slice(&[0x85, 0xC0]); // test eax, eax
+            c.extend_from_slice(&[0x0F, 0x84, 0, 0, 0, 0]); // je fail
+            fails.push(c.len() - 4);
+            c.extend_from_slice(&[0x48, 0x83, 0x7C, 0x24, 0x48, 26]); // cmp qword [rsp+48], 26
+            c.extend_from_slice(&[0x0F, 0x85, 0, 0, 0, 0]); // jne fail
+            fails.push(c.len() - 4);
+            // loop: ReadFile(h, buf @ [rsp+50], 32, &n @ [rsp+38], 0)
+            let loop_pos = c.len();
+            c.extend_from_slice(&[0x48, 0x8B, 0x4C, 0x24, 0x40]); // mov rcx, [rsp+40]
+            c.extend_from_slice(&[0x48, 0x8D, 0x54, 0x24, 0x50]); // lea rdx, [rsp+50]
+            c.extend_from_slice(&[0x41, 0xB8, 32, 0, 0, 0]); // mov r8d, 32
+            c.extend_from_slice(&[0x4C, 0x8D, 0x4C, 0x24, 0x38]); // lea r9, [rsp+38]
+            c.extend_from_slice(&[0x48, 0xC7, 0x44, 0x24, 0x20, 0, 0, 0, 0]);
+            rip_rel_to(&mut c, &[0xFF, 0x15], slot[4]); // call [ReadFile]
+            c.extend_from_slice(&[0x85, 0xC0]); // test eax, eax
+            c.extend_from_slice(&[0x0F, 0x84, 0, 0, 0, 0]); // je fail
+            fails.push(c.len() - 4);
+            c.extend_from_slice(&[0x83, 0x7C, 0x24, 0x38, 0x00]); // cmp dword [rsp+38], 0
+            c.extend_from_slice(&[0x0F, 0x84, 0, 0, 0, 0]); // je done
+            let done_fix = c.len() - 4;
+            // WriteFile(GetStdHandle(-11), buf, n, &w @ [rsp+3C], 0)
+            c.extend_from_slice(&[0xB9, 0xF5, 0xFF, 0xFF, 0xFF]); // mov ecx, -11
+            rip_rel_to(&mut c, &[0xFF, 0x15], slot[0]); // call [GetStdHandle]
+            c.extend_from_slice(&[0x48, 0x89, 0xC1]); // mov rcx, rax
+            c.extend_from_slice(&[0x48, 0x8D, 0x54, 0x24, 0x50]); // lea rdx, [rsp+50]
+            c.extend_from_slice(&[0x44, 0x8B, 0x44, 0x24, 0x38]); // mov r8d, [rsp+38]
+            c.extend_from_slice(&[0x4C, 0x8D, 0x4C, 0x24, 0x3C]); // lea r9, [rsp+3C]
+            c.extend_from_slice(&[0x48, 0xC7, 0x44, 0x24, 0x20, 0, 0, 0, 0]);
+            rip_rel_to(&mut c, &[0xFF, 0x15], slot[5]); // call [WriteFile]
+            c.push(0xE9); // jmp loop
+            let rel = loop_pos as i32 - (c.len() as i32 + 4);
+            c.extend_from_slice(&rel.to_le_bytes());
+            // done: CloseHandle(h); ExitProcess(0)
+            let done_pos = c.len();
+            let rel = done_pos as i32 - (done_fix as i32 + 4);
+            c[done_fix..done_fix + 4].copy_from_slice(&rel.to_le_bytes());
+            c.extend_from_slice(&[0x48, 0x8B, 0x4C, 0x24, 0x40]); // mov rcx, [rsp+40]
+            rip_rel_to(&mut c, &[0xFF, 0x15], slot[6]); // call [CloseHandle]
+            c.extend_from_slice(&[0x31, 0xC9]); // xor ecx, ecx
+            rip_rel_to(&mut c, &[0xFF, 0x15], slot[7]); // call [ExitProcess]
+            c.extend_from_slice(&[0x0F, 0x0B]); // ud2
+            // fail: ExitProcess(0xBAD)
+            let fail_pos = c.len();
+            c.extend_from_slice(&[0xB9, 0xAD, 0x0B, 0, 0]);
+            rip_rel_to(&mut c, &[0xFF, 0x15], slot[7]);
+            c.extend_from_slice(&[0x0F, 0x0B]);
+            for f in fails {
+                let rel = fail_pos as i32 - (f as i32 + 4);
+                c[f..f + 4].copy_from_slice(&rel.to_le_bytes());
+            }
+            // path (UTF-16LE, NUL-terminated) after the code; patch the lea.
+            while !c.len().is_multiple_of(2) {
+                c.push(0xCC);
+            }
+            let path_pos = c.len();
+            for ch in r"C:\cat.txt".encode_utf16().chain(core::iter::once(0)) {
+                c.extend_from_slice(&ch.to_le_bytes());
+            }
+            let rel = path_pos as i32 - (lea_at as i32 + 4);
+            c[lea_at..lea_at + 4].copy_from_slice(&rel.to_le_bytes());
+            c
+        },
+    )
+}
+
 /// Test `.exe` that calls `kernel32!TukosCloseForward(0x1234)`, which kernel32
 /// exports as a forwarder to `ntdll.NtClose` (1 arg -> 1 arg). The bogus handle makes
 /// NtClose return STATUS_INVALID_HANDLE in rax; the exe then calls

@@ -130,6 +130,15 @@ unsafe extern "system" {
         byte_offset: *const i64,
         key: *const u32,
     ) -> i32;
+    // TukOS file extensions (kernel/src/syscall.rs NT_OPEN_FILE/SET_FILE_POINTER/QUERY_FILE_SIZE).
+    fn NtTukosOpenFile(
+        out_handle: *mut isize,
+        path: *const u16,
+        path_bytes: u32,
+        access: u32,
+    ) -> i32;
+    fn NtTukosSetFilePointer(handle: isize, dist: i64, method: u32, out_new: *mut u64) -> i32;
+    fn NtTukosQueryFileSize(handle: isize, out_size: *mut u64) -> i32;
     fn NtTerminateProcess(process: isize, status: i32) -> i32;
     fn NtClose(handle: isize) -> i32;
     fn RtlGetProcessHeap() -> *mut c_void;
@@ -382,12 +391,16 @@ const TEB_LAST_ERROR: usize = 0x68;
 const PEB_IMAGE_BASE: usize = 0x10;
 
 const ERROR_FILE_NOT_FOUND: u32 = 2;
+const ERROR_ACCESS_DENIED: u32 = 5;
+const ERROR_INVALID_PARAMETER: u32 = 87;
+const ERROR_FILENAME_EXCED_RANGE: u32 = 206;
 const ERROR_INVALID_HANDLE: u32 = 6;
 const ERROR_CALL_NOT_IMPLEMENTED: u32 = 120;
 const ERROR_INSUFFICIENT_BUFFER: u32 = 122;
 const ERROR_MOD_NOT_FOUND: u32 = 126;
 const ERROR_PROC_NOT_FOUND: u32 = 127;
 const TLS_OUT_OF_INDEXES: u32 = 0xFFFF_FFFF;
+const FILE_TYPE_DISK: u32 = 1;
 const FILE_TYPE_CHAR: u32 = 2;
 
 /// Sentinel exit statuses of the cold paths (seen as a TerminateProcess status).
@@ -940,10 +953,26 @@ pub unsafe extern "system" fn HeapReAlloc(
 
 // --- files / console / locale (Task-3 placeholders: all names resolve) ---------------
 
-/// `GetFileType` [T3]: every handle is a character device (serial/console).
+/// `GetFileType` [real]: the kernel itself tells file handles from console ones --
+/// `NtTukosQueryFileSize` succeeds only on a file handle, so success => FILE_TYPE_DISK.
+/// Otherwise the three standard handles (console/serial) are FILE_TYPE_CHAR and
+/// anything else FILE_TYPE_UNKNOWN (0, with ERROR_INVALID_HANDLE as documented).
 #[unsafe(no_mangle)]
-pub extern "system" fn GetFileType(_h: isize) -> u32 {
-    FILE_TYPE_CHAR
+pub extern "system" fn GetFileType(h: isize) -> u32 {
+    let mut size = 0u64;
+    if unsafe { NtTukosQueryFileSize(h, &mut size) } >= 0 {
+        return FILE_TYPE_DISK;
+    }
+    if h != 0
+        && h != INVALID_HANDLE_VALUE
+        && (h == GetStdHandle(STD_INPUT_HANDLE)
+            || h == GetStdHandle(STD_OUTPUT_HANDLE)
+            || h == GetStdHandle(STD_ERROR_HANDLE))
+    {
+        return FILE_TYPE_CHAR;
+    }
+    SetLastError(ERROR_INVALID_HANDLE);
+    0
 }
 /// `GetConsoleMode` [T3]: FALSE, so the CRT writes through `WriteFile`.
 #[unsafe(no_mangle)]
@@ -978,19 +1007,69 @@ pub extern "system" fn FlushFileBuffers(_h: isize) -> i32 {
 pub extern "system" fn SetStdHandle(_which: i32, _h: isize) -> i32 {
     1
 }
-/// `CreateFileW` [stub, cold]: INVALID_HANDLE_VALUE + ERROR_FILE_NOT_FOUND.
+const STATUS_OBJECT_NAME_NOT_FOUND: i32 = 0xC000_0034u32 as i32;
+const STATUS_NAME_TOO_LONG: i32 = 0xC000_0106u32 as i32;
+const STATUS_ACCESS_DENIED: i32 = 0xC000_0022u32 as i32;
+const STATUS_INVALID_PARAMETER: i32 = 0xC000_000Du32 as i32;
+/// Longest accepted path in UTF-16 units (MAX_PATH); the kernel enforces 520 bytes.
+const MAX_PATH_CHARS: usize = 260;
+
+/// Maps an NTSTATUS from the file syscalls to a Win32 error code.
+fn status_to_win32(st: i32) -> u32 {
+    match st {
+        STATUS_OBJECT_NAME_NOT_FOUND => ERROR_FILE_NOT_FOUND,
+        STATUS_ACCESS_DENIED => ERROR_ACCESS_DENIED,
+        STATUS_NAME_TOO_LONG => ERROR_FILENAME_EXCED_RANGE,
+        STATUS_INVALID_PARAMETER => ERROR_INVALID_PARAMETER,
+        _ => ERROR_INVALID_HANDLE,
+    }
+}
+
+/// `CreateFileW` [real, read-only FS]: forwards to `NtTukosOpenFile` with the access
+/// mask. The in-kernel initrd is read-only, so any write-class access is refused by
+/// the kernel with ACCESS_DENIED -> ERROR_ACCESS_DENIED; creation dispositions
+/// (CREATE_NEW/CREATE_ALWAYS/TRUNCATE_EXISTING) are write operations too and are
+/// refused the same way. Share mode, security attributes, flags and template are
+/// ignored. Missing file -> ERROR_FILE_NOT_FOUND; path > 260 chars ->
+/// ERROR_FILENAME_EXCED_RANGE. Failure returns INVALID_HANDLE_VALUE.
+///
+/// # Safety
+/// `name` is null or a NUL-terminated UTF-16 string.
 #[unsafe(no_mangle)]
-pub extern "system" fn CreateFileW(
-    _name: *const u16,
-    _access: u32,
+pub unsafe extern "system" fn CreateFileW(
+    name: *const u16,
+    access: u32,
     _share: u32,
     _sa: *const c_void,
-    _disp: u32,
+    disp: u32,
     _attrs: u32,
     _template: isize,
 ) -> isize {
-    SetLastError(ERROR_FILE_NOT_FOUND);
-    INVALID_HANDLE_VALUE
+    if name.is_null() {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return INVALID_HANDLE_VALUE;
+    }
+    // CREATE_NEW(1)/CREATE_ALWAYS(2)/TRUNCATE_EXISTING(5) always write.
+    if matches!(disp, 1 | 2 | 5) {
+        SetLastError(ERROR_ACCESS_DENIED);
+        return INVALID_HANDLE_VALUE;
+    }
+    // Bounded scan: at most MAX_PATH_CHARS + 1 units to find the terminator.
+    let mut len = 0usize;
+    while len <= MAX_PATH_CHARS && unsafe { core::ptr::read_volatile(name.add(len)) } != 0 {
+        len += 1;
+    }
+    if len > MAX_PATH_CHARS {
+        SetLastError(ERROR_FILENAME_EXCED_RANGE);
+        return INVALID_HANDLE_VALUE;
+    }
+    let mut h: isize = 0;
+    let st = unsafe { NtTukosOpenFile(&mut h, name, (len * 2) as u32, access) };
+    if st < 0 {
+        SetLastError(status_to_win32(st));
+        return INVALID_HANDLE_VALUE;
+    }
+    h
 }
 /// `FindFirstFileExW` [stub, cold]: INVALID_HANDLE_VALUE + ERROR_FILE_NOT_FOUND.
 #[unsafe(no_mangle)]
@@ -1016,21 +1095,82 @@ pub extern "system" fn FindNextFileW(_h: isize, _data: *mut c_void) -> i32 {
 pub extern "system" fn FindClose(_h: isize) -> i32 {
     1
 }
-/// `GetFileSizeEx` [stub, cold]: FALSE + ERROR_INVALID_HANDLE.
+/// `GetFileSizeEx` [real]: size via `NtTukosQueryFileSize`; FALSE on a non-file handle.
+///
+/// # Safety
+/// `size` is null or writable (8 bytes).
 #[unsafe(no_mangle)]
-pub extern "system" fn GetFileSizeEx(_h: isize, _size: *mut i64) -> i32 {
-    SetLastError(ERROR_INVALID_HANDLE);
-    0
+pub unsafe extern "system" fn GetFileSizeEx(h: isize, size: *mut i64) -> i32 {
+    let mut v = 0u64;
+    let st = unsafe { NtTukosQueryFileSize(h, &mut v) };
+    if st < 0 || size.is_null() {
+        SetLastError(if st < 0 {
+            status_to_win32(st)
+        } else {
+            ERROR_INVALID_PARAMETER
+        });
+        return 0;
+    }
+    unsafe { core::ptr::write_unaligned(size, v as i64) };
+    1
 }
-/// `SetFilePointerEx` [stub, cold]: FALSE + ERROR_INVALID_HANDLE.
+/// `SetFilePointerEx` [real]: FILE_BEGIN(0)/CURRENT(1)/END(2) via `NtTukosSetFilePointer`
+/// (position clamped to the file size by the kernel; negative result -> FALSE with
+/// ERROR_INVALID_PARAMETER). Writes the new position when `new` is non-null.
+///
+/// # Safety
+/// `new` is null or writable (8 bytes).
 #[unsafe(no_mangle)]
-pub extern "system" fn SetFilePointerEx(
-    _h: isize,
-    _dist: i64,
-    _new: *mut i64,
-    _method: u32,
+pub unsafe extern "system" fn SetFilePointerEx(
+    h: isize,
+    dist: i64,
+    new: *mut i64,
+    method: u32,
 ) -> i32 {
-    SetLastError(ERROR_INVALID_HANDLE);
+    let mut pos = 0u64;
+    let st = unsafe { NtTukosSetFilePointer(h, dist, method, &mut pos) };
+    if st < 0 {
+        SetLastError(status_to_win32(st));
+        return 0;
+    }
+    if !new.is_null() {
+        unsafe { core::ptr::write_unaligned(new, pos as i64) };
+    }
+    1
+}
+/// `SetFilePointer` [real, thin wrapper]: 32-bit legacy form over `SetFilePointerEx`
+/// (honours `high` as the upper 32 bits of the distance and returns the new position's
+/// high half there); returns INVALID_SET_FILE_POINTER (0xFFFFFFFF) on failure.
+///
+/// # Safety
+/// `high` is null or read/writable (4 bytes).
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn SetFilePointer(
+    h: isize,
+    low: i32,
+    high: *mut i32,
+    method: u32,
+) -> u32 {
+    let dist = if high.is_null() {
+        i64::from(low)
+    } else {
+        (i64::from(unsafe { core::ptr::read_unaligned(high) }) << 32) | i64::from(low as u32)
+    };
+    let mut pos = 0i64;
+    if unsafe { SetFilePointerEx(h, dist, &mut pos, method) } == 0 {
+        return 0xFFFF_FFFF;
+    }
+    if !high.is_null() {
+        unsafe { core::ptr::write_unaligned(high, (pos >> 32) as i32) };
+    }
+    SetLastError(0);
+    pos as u32
+}
+/// `SetEndOfFile` [stub]: the initrd is read-only, so FALSE + ERROR_ACCESS_DENIED.
+/// (`fopen("rb")` never calls it; this just resolves the import.)
+#[unsafe(no_mangle)]
+pub extern "system" fn SetEndOfFile(_h: isize) -> i32 {
+    SetLastError(ERROR_ACCESS_DENIED);
     0
 }
 /// `GetACP` [T3]: 1252.

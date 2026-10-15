@@ -125,6 +125,7 @@ const TESTS: &[(&str, TestFn)] = &[
     ("kernel32_embedded_parses", kernel32_embedded_parses),
     ("kernel32_exports_crt_surface", kernel32_exports_crt_surface),
     ("crt_hello_runs", crt_hello_runs),
+    ("program_reads_file", program_reads_file),
     ("echo_reads_and_prints", echo_reads_and_prints),
     ("two_modules_no_overlap", two_modules_no_overlap),
     (
@@ -1580,6 +1581,39 @@ fn console_read_returns_input() -> Result<(), &'static str> {
     run_console_read(b"oi\n", b"oi\n", b"oi\n")?;
     // Backspace erases the 'b' (echo "\b \b") and is not returned.
     run_console_read(b"ab\x08c\n", b"ac\n", b"ab\x08 \x08c\n")
+}
+
+/// End to end: a user exe opens `C:\cat.txt` (initrd) through kernel32!CreateFileW,
+/// reads it with ReadFile and writes it to stdout; it exits 0 and is reaped.
+fn program_reads_file() -> Result<(), &'static str> {
+    use core::sync::atomic::Ordering;
+    if !have_both_dlls() {
+        return Ok(()); // ntdll/kernel32 not embedded on this host: skip.
+    }
+    let want: &[u8] = b"arquivo de teste do TukOS
+";
+    crate::syscall::LAST_WRITE_LEN.store(0, Ordering::SeqCst);
+    crate::syscall::LAST_TERMINATE_STATUS.store(u64::MAX, Ordering::SeqCst);
+    let before = crate::mem::frames::free_frame_count();
+    crate::process::spawn_exe_image_with_k32(crate::process::build_exe_reads_file());
+    for _ in 0..40000 {
+        crate::sched::yield_now();
+        let st = crate::syscall::LAST_TERMINATE_STATUS.load(Ordering::SeqCst);
+        if st != u64::MAX && crate::mem::frames::free_frame_count() == before {
+            if st != 0 {
+                return Err(
+                    "program_reads_file: o exe saiu != 0 (0xBAD = CreateFile/tipo/tamanho/Read falhou)",
+                );
+            }
+            if crate::syscall::LAST_WRITE_LEN.load(Ordering::SeqCst) != want.len() as u64
+                || !crate::syscall::last_write_is(want)
+            {
+                return Err("program_reads_file: conteudo lido diferente de cat.txt");
+            }
+            return Ok(());
+        }
+    }
+    Err("program_reads_file: o exe nao terminou/foi recolhido")
 }
 
 fn heap_alloc_write_free() -> Result<(), &'static str> {
