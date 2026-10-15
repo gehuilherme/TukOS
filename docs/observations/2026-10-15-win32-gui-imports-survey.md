@@ -45,17 +45,17 @@ Resolvido pela tabela real: **os tres estao em USER32.dll** (FillRect, BeginPain
 Nao ha nenhum import de gdi32 para eles. `CreateSolidBrush`/`GetStockObject`/`DeleteObject`/
 `SetBkMode`/`SetTextColor`/`TextOutA` estao em GDI32.dll.
 
-### KERNEL32.dll (69) e outros
+### KERNEL32.dll (65)
 
 Nenhuma outra DLL e importada (so USER32, GDI32, KERNEL32). Os imports de KERNEL32 vem
-quase todos do runtime C estatico (/MT); a lista completa esta no dump abaixo. Entre eles
-o app em si nao chama nenhum diretamente; o que o GUI exige alem do que o kernel32 do TukOS
-ja tem: `GetStartupInfoW` (usado pelo `WinMainCRTStartup` para obter `nCmdShow`),
-`GetModuleHandleW`, `GetCommandLineA/W`. Para o CRT: ver a lista; muitos
-(`FindFirstFileExW`, `LCMapStringW`, `GetStringTypeW`, `LoadLibraryExW`, etc.) so sao referenciados,
-precisam existir no export do nosso kernel32 para o loader resolver o IAT (stubs bastam
-quando nao executados). Ponto de atencao para o subprojeto: o CRT de WinMain usa
-`WinMainCRTStartup`, diferente do `mainCRTStartup` dos testes de conformidade atuais.
+quase todos do runtime C estatico (/MT); a lista completa esta no dump abaixo. O app em si
+nao chama nenhum diretamente. Hipotese (nao verificada import a import): o startup
+`WinMainCRTStartup` usa `GetStartupInfoW` para obter `nCmdShow`; `GetModuleHandleW`,
+`GetStartupInfoW` e `GetCommandLineA/W` ja existem em `crates/kernel32/src/lib.rs`. Os demais
+imports do CRT (`FindFirstFileExW`, `LCMapStringW`, `GetStringTypeW`, `LoadLibraryExW`, etc.)
+provavelmente so precisam existir no export do nosso kernel32 para o loader resolver o IAT
+(stubs bastam se nao forem executados); a conferencia fica para a T4. Ponto de atencao: o CRT
+de WinMain usa `WinMainCRTStartup`, diferente do `mainCRTStartup` dos testes de conformidade atuais.
 
 ## Structs (layout publico, x64)
 
@@ -150,4 +150,4 @@ KERNEL32.dll: GetConsoleMode GetConsoleOutputCP SetFilePointerEx HeapReAlloc Hea
               SetStdHandle GetFileType GetStringTypeW LCMapStringW
 ```
 
-(Importados por ordem de IAT; o dump completo com hints esta no relatorio da task.)
+(Importados por ordem de IAT.)
