@@ -134,6 +134,7 @@ const TESTS: &[(&str, TestFn)] = &[
     ("program_reads_file", program_reads_file),
     ("program_spawns_child", program_spawns_child),
     ("echo_reads_and_prints", echo_reads_and_prints),
+    ("window_paints", window_paints),
     ("shell_runs_command", shell_runs_command),
     ("shell_unknown_and_help", shell_unknown_and_help),
     ("shell_echo_args", shell_echo_args),
@@ -453,6 +454,62 @@ fn echo_reads_and_prints() -> Result<(), &'static str> {
         }
     }
     Err("echo nao terminou/recolheu os frames")
+}
+
+/// The GUI test program (target/conformance/gui/test_win.exe; empty if not built).
+static TEST_WIN_EXE: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/test_win.exe"));
+
+/// Known-blue pixel a correct paint leaves in the framebuffer: brush RGB(0,0,255) =
+/// COLORREF 0x00FF0000 -> framebuffer 0x00RRGGBB = 0x000000FF.
+const WINDOW_BLUE: u32 = 0x0000_00FF;
+
+/// End to end GUI: a real Win32 program (exe -> user32 -> gdi32 -> kernel32 -> ntdll)
+/// registers a class, creates a window, runs the message loop, and on WM_PAINT fills the
+/// rect (50,50)-(150,150) blue via BeginPaint/FillRect/EndPaint, then PostQuitMessage(0)
+/// and exits 0. We boot it through the GUI spawn path, run the scheduler until it exits,
+/// then assert a pixel inside the rect is blue and one outside is not, and that the
+/// process was reaped (frames back to baseline). The framebuffer is cleared at the end.
+fn window_paints() -> Result<(), &'static str> {
+    use core::sync::atomic::Ordering;
+    if !crate::process::have_gui_dlls() || TEST_WIN_EXE.is_empty() {
+        return Ok(()); // DLLs/test_win.exe not embedded on this host: skip.
+    }
+    // A clean surface so a stale pixel can never fake a pass.
+    if let Some(con) = crate::fbcon::FBCON.lock().as_mut() {
+        con.clear();
+    }
+    crate::syscall::LAST_TERMINATE_STATUS.store(u64::MAX, Ordering::SeqCst);
+    let before = crate::mem::frames::free_frame_count();
+    crate::process::spawn_exe_image_with_gui(TEST_WIN_EXE.to_vec(), None)
+        .map_err(|_| "window_paints: spawn falhou")?;
+    for _ in 0..40000 {
+        crate::sched::yield_now();
+        let st = crate::syscall::LAST_TERMINATE_STATUS.load(Ordering::SeqCst);
+        if st != u64::MAX {
+            if (0xC000_7001..=0xC000_700A).contains(&st) {
+                crate::kprintln!("window_paints: loader status {:#x}", st);
+                return Err("window_paints: o loader morreu (import nao resolvido?)");
+            }
+            if st != 0 {
+                crate::kprintln!("window_paints terminou com status {:#x}", st);
+                return Err("window_paints: exit code != 0");
+            }
+            // Inside the painted rect must be blue; a point outside it must not be.
+            if crate::fbcon::pixel(100, 100) != Some(WINDOW_BLUE) {
+                return Err("window_paints: pixel dentro do retangulo nao e azul");
+            }
+            if crate::fbcon::pixel(10, 10) == Some(WINDOW_BLUE) {
+                return Err("window_paints: pixel fora do retangulo ficou azul");
+            }
+            if crate::mem::frames::free_frame_count() == before {
+                if let Some(con) = crate::fbcon::FBCON.lock().as_mut() {
+                    con.clear();
+                }
+                return Ok(());
+            }
+        }
+    }
+    Err("window_paints nao terminou/recolheu os frames")
 }
 
 /// The `/MT` argv.exe (target/conformance/crt/argv.exe; empty if not built).

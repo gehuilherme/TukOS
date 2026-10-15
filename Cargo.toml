@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["xtask", "crates/arch-x86_64", "crates/mm", "crates/pe", "crates/kbd", "crates/gfx", "crates/ntdll", "crates/kernel32", "crates/gdi32", "kernel"]
+members = ["xtask", "crates/arch-x86_64", "crates/mm", "crates/pe", "crates/kbd", "crates/gfx", "crates/ntdll", "crates/kernel32", "crates/gdi32", "crates/user32", "kernel"]
 default-members = ["xtask", "crates/arch-x86_64", "crates/mm", "crates/pe", "crates/kbd", "crates/gfx"]
 
 [workspace.package]

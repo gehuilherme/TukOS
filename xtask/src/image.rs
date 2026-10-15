@@ -29,6 +29,17 @@ pub fn build(features: &[&str]) -> crate::Result<PathBuf> {
     if let Err(e) = crate::kernel32::build() {
         eprintln!("aviso: kernel32 nao compilado ({e}); kernel embute kernel32 vazio");
     }
+    if let Err(e) = crate::gdi32::build() {
+        eprintln!("aviso: gdi32 nao compilado ({e}); kernel embute gdi32 vazio");
+    }
+    if let Err(e) = crate::user32::build() {
+        eprintln!("aviso: user32 nao compilado ({e}); kernel embute user32 vazio");
+    }
+    // The GUI test program (test_win.exe) needs the real MSVC SDK libs; without MSVC
+    // it is simply not embedded and the `window_paints` ktest skips.
+    if let Err(e) = crate::conformance::build_gui_test(&root) {
+        eprintln!("aviso: test_win.exe nao compilado ({e}); ktest window_paints sera pulado");
+    }
     let kernel = build_kernel(&root, features)?;
     let bootx64 = ensure_limine(&root)?;
     let variant = if features.is_empty() {

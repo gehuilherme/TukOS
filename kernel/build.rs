@@ -14,6 +14,7 @@ fn main() {
     embed_conformance(&dir, "crt/parent.exe", "parent.exe");
     embed_conformance(&dir, "crt/child.exe", "child.exe");
     embed_conformance(&dir, "crt/shell.exe", "shell.exe");
+    embed_conformance(&dir, "gui/test_win.exe", "test_win.exe");
 
     // Embed the ntdll.dll produced by `cargo xtask ntdll` (we only copy the
     // artifact: no nested cargo, so no target-lock contention). If it is
@@ -48,6 +49,28 @@ fn main() {
             "cargo:warning=kernel32.dll not found; embedding empty (run `cargo xtask kernel32` on Windows)"
         );
         std::fs::write(&out, []).expect("write empty kernel32.dll");
+    }
+
+    embed_dll(&dir, "gdi32.dll", "gdi32");
+    embed_dll(&dir, "user32.dll", "user32");
+}
+
+// Embed a Windows DLL built by `cargo xtask <name>` (empty if absent, e.g. Linux CI).
+fn embed_dll(dir: &str, file: &str, crate_name: &str) {
+    let out = PathBuf::from(std::env::var("OUT_DIR").unwrap()).join(file);
+    let src = PathBuf::from(dir)
+        .join("..")
+        .join("target")
+        .join("x86_64-pc-windows-msvc")
+        .join("release")
+        .join(file);
+    println!("cargo:rerun-if-changed={}", src.display());
+    println!("cargo:rerun-if-changed=../crates/{crate_name}/src");
+    if std::fs::copy(&src, &out).is_err() {
+        println!(
+            "cargo:warning={file} not found; embedding empty (run `cargo xtask {crate_name}` on Windows)"
+        );
+        std::fs::write(&out, []).expect("write empty dll");
     }
 }
 

@@ -126,6 +126,39 @@ fn build_crt_exe(vcvars: &Path, root: &Path, name: &str) -> crate::Result<PathBu
         .ok_or_else(|| format!("crt/{name}.exe nao foi gerado"))
 }
 
+/// Compiles `gui/test_win/test_win.c` as a CONSOLE `/MT` program (default
+/// `mainCRTStartup`), linking the REAL SDK `user32.lib`/`gdi32.lib` (kernel32 comes
+/// in through the static CRT), into `target/conformance/gui/test_win.exe`. At runtime
+/// TukOS binds those imports to OUR user32/gdi32/kernel32 by name. Returns Ok even
+/// without MSVC (then nothing is built and the `window_paints` ktest skips).
+pub fn build_gui_test(root: &Path) -> crate::Result<()> {
+    if !cfg!(windows) {
+        return Ok(());
+    }
+    let Some(vcvars) = find_vcvars() else {
+        return Ok(());
+    };
+    let outdir = root.join("target").join("conformance").join("gui");
+    std::fs::create_dir_all(&outdir).map_err(|e| e.to_string())?;
+    let src = root.join("gui").join("test_win").join("test_win.c");
+    let bat = outdir.join("build-test_win.bat");
+    let script = format!(
+        "@echo off\r\n\
+         call \"{vcvars}\" >nul || exit /b 1\r\n\
+         cd /d \"{outdir}\" || exit /b 1\r\n\
+         cl /nologo /MT /GS- \"{src}\" /link /nologo user32.lib gdi32.lib /OUT:test_win.exe || exit /b 1\r\n",
+        vcvars = vcvars.display(),
+        outdir = outdir.display(),
+        src = src.display(),
+    );
+    std::fs::write(&bat, script).map_err(|e| e.to_string())?;
+    run(Command::new("cmd").arg("/C").arg(&bat))?;
+    let exe = outdir.join("test_win.exe");
+    exe.is_file()
+        .then_some(())
+        .ok_or_else(|| "test_win.exe nao foi gerado".to_string())
+}
+
 /// One case: run `exe` on the real Windows, boot the kernel built with `features`, compare.
 fn run_case(
     label: &str,

@@ -4,7 +4,6 @@ use std::process::Command;
 const TARGET: &str = "x86_64-pc-windows-msvc";
 
 /// Builds `crates/gdi32` for Windows x64 (release) and returns the DLL path.
-#[allow(dead_code)] // consumed by the Plano 21 exe image (Task 4)
 pub fn build() -> crate::Result<PathBuf> {
     crate::util::run(Command::new("cargo").args([
         "build",

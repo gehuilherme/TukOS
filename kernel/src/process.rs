@@ -607,26 +607,44 @@ pub fn build_exe_ntdll_space() -> ExeSpace {
 
 /// Same as `build_exe_ntdll_space` for an arbitrary test `.exe`.
 pub fn build_exe_ntdll_space_with(exe: alloc::vec::Vec<u8>) -> ExeSpace {
-    build_space(exe, false, &[])
+    build_space(exe, false, false, &[])
 }
 
 const KERNEL32_LOAD_BASE: u64 = 0x0800_0000;
 pub const KERNEL32_BASE: u64 = KERNEL32_LOAD_BASE;
 
+// GUI DLLs sit between kernel32 (0x0800_0000) and ntdll (0x1000_0000), each 32 MiB
+// apart so no image_top ever reaches the next base: exe < kernel32 < gdi32 < user32 < ntdll.
+const GDI32_LOAD_BASE: u64 = 0x0C00_0000;
+const USER32_LOAD_BASE: u64 = 0x0E00_0000;
+
 /// Like `build_exe_ntdll_space_with` but maps three modules (exe 0x40_0000,
 /// kernel32 0x0800_0000, ntdll 0x1000_0000) and lists them in load order
 /// exe, kernel32, ntdll. Requires both DLLs to be embedded.
 pub fn build_exe_k32_space_with(exe: alloc::vec::Vec<u8>) -> ExeSpace {
-    build_space(exe, true, &[])
+    build_space(exe, true, false, &[])
 }
 
 /// `build_exe_k32_space_with` with an explicit command line (UTF-16, no NUL) stored in
 /// `PEB->ProcessParameters->CommandLine`. Empty = default image name.
 pub fn build_exe_k32_space_with_cmdline(exe: alloc::vec::Vec<u8>, cmdline: &[u16]) -> ExeSpace {
-    build_space(exe, true, cmdline)
+    build_space(exe, true, false, cmdline)
 }
 
-fn build_space(exe: alloc::vec::Vec<u8>, with_k32: bool, cmdline: &[u16]) -> ExeSpace {
+/// Like `build_exe_k32_space_with` but also maps gdi32 and user32 (five modules:
+/// exe 0x40_0000, kernel32 0x0800_0000, gdi32 0x0C00_0000, user32 0x0E00_0000,
+/// ntdll 0x1000_0000) in load order exe, kernel32, gdi32, user32, ntdll. Requires all
+/// four DLLs to be embedded. For a GUI process.
+pub fn build_exe_gui_space_with(exe: alloc::vec::Vec<u8>) -> ExeSpace {
+    build_space(exe, true, true, &[])
+}
+
+fn build_space(
+    exe: alloc::vec::Vec<u8>,
+    with_k32: bool,
+    with_gui: bool,
+    cmdline: &[u16],
+) -> ExeSpace {
     let nt = crate::ntdll_image::NTDLL_BYTES;
     let k32 = crate::kernel32_image::KERNEL32_BYTES;
     let space = AddressSpace::new_user();
@@ -640,16 +658,41 @@ fn build_space(exe: alloc::vec::Vec<u8>, with_k32: bool, cmdline: &[u16]) -> Exe
         name: "program.exe",
     });
     let mut prev_top = exe_top;
-    if with_k32 {
+    if with_k32 || with_gui {
         let entry = crate::loader::load_pe(&space, k32, KERNEL32_LOAD_BASE).expect("load kernel32");
         let top = crate::loader::image_top(k32, KERNEL32_LOAD_BASE).expect("image_top");
-        // Images must not overlap: exe < kernel32 < ntdll.
+        // Images must not overlap: exe < kernel32 < gdi32 < user32 < ntdll.
         assert!(prev_top <= KERNEL32_LOAD_BASE, "exe invade o kernel32");
         mods.push(crate::teb::LdrModule {
             base: KERNEL32_LOAD_BASE,
             entry,
             size: (top - KERNEL32_LOAD_BASE) as u32,
             name: "kernel32.dll",
+        });
+        prev_top = top;
+    }
+    if with_gui {
+        let gdi = crate::gdi32_image::GDI32_BYTES;
+        let entry = crate::loader::load_pe(&space, gdi, GDI32_LOAD_BASE).expect("load gdi32");
+        let top = crate::loader::image_top(gdi, GDI32_LOAD_BASE).expect("image_top");
+        assert!(prev_top <= GDI32_LOAD_BASE, "kernel32 invade o gdi32");
+        mods.push(crate::teb::LdrModule {
+            base: GDI32_LOAD_BASE,
+            entry,
+            size: (top - GDI32_LOAD_BASE) as u32,
+            name: "gdi32.dll",
+        });
+        prev_top = top;
+
+        let u32img = crate::user32_image::USER32_BYTES;
+        let entry = crate::loader::load_pe(&space, u32img, USER32_LOAD_BASE).expect("load user32");
+        let top = crate::loader::image_top(u32img, USER32_LOAD_BASE).expect("image_top");
+        assert!(prev_top <= USER32_LOAD_BASE, "gdi32 invade o user32");
+        mods.push(crate::teb::LdrModule {
+            base: USER32_LOAD_BASE,
+            entry,
+            size: (top - USER32_LOAD_BASE) as u32,
+            name: "user32.dll",
         });
         prev_top = top;
     }
@@ -793,6 +836,47 @@ pub fn spawn_exe_image_with_k32_cmd(
         return Err(SpawnError::NoThreads);
     }
     let es = build_exe_k32_space_with_cmdline(exe, cmdline);
+    let rva = pe::PeFile::parse(nt)
+        .ok()
+        .and_then(|p| p.export_rva_by_name("LdrInitializeThunk"))
+        .expect("ntdll sem LdrInitializeThunk");
+    let kstack = alloc::vec![0u8; KSTACK_SIZE].into_boxed_slice();
+    crate::sched::spawn_user_with_exit(
+        es.space,
+        NTDLL_LOAD_BASE + u64::from(rva),
+        es.stack_va + 4096,
+        kstack,
+        es.teb_va,
+        proc_exit,
+    )
+    .map(|_| ())
+    .ok_or(SpawnError::NoThreads)
+}
+
+/// True when all four user-mode DLLs a GUI process needs are embedded.
+pub fn have_gui_dlls() -> bool {
+    !crate::ntdll_image::NTDLL_BYTES.is_empty()
+        && !crate::kernel32_image::KERNEL32_BYTES.is_empty()
+        && !crate::gdi32_image::GDI32_BYTES.is_empty()
+        && !crate::user32_image::USER32_BYTES.is_empty()
+}
+
+/// Starts a GUI `exe` with five modules (exe + kernel32 + gdi32 + user32 + ntdll) on a
+/// new user thread that begins at ntdll's `LdrInitializeThunk`, so the loader binds the
+/// exe's user32/gdi32/kernel32 imports by name. `proc_exit` (optional) records the exit
+/// status. Fails with `NoDlls` unless all four DLLs are embedded.
+pub fn spawn_exe_image_with_gui(
+    exe: alloc::vec::Vec<u8>,
+    proc_exit: Option<alloc::sync::Arc<crate::object::ProcExit>>,
+) -> Result<(), SpawnError> {
+    let nt = crate::ntdll_image::NTDLL_BYTES;
+    if !have_gui_dlls() {
+        return Err(SpawnError::NoDlls);
+    }
+    if !crate::sched::has_thread_capacity() {
+        return Err(SpawnError::NoThreads);
+    }
+    let es = build_exe_gui_space_with(exe);
     let rva = pe::PeFile::parse(nt)
         .ok()
         .and_then(|p| p.export_rva_by_name("LdrInitializeThunk"))

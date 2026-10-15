@@ -8,6 +8,7 @@ mod console;
 mod conformance;
 mod fbcon;
 mod fs;
+mod gdi32_image;
 mod kbd;
 mod kernel32_image;
 #[cfg(feature = "ktest")]
@@ -24,6 +25,7 @@ mod serial;
 mod syscall;
 mod teb;
 mod trap;
+mod user32_image;
 mod user_demo;
 mod usercopy;
 mod vmem;
