@@ -58,7 +58,13 @@ pub fn run() -> ! {
     #[cfg(feature = "conformance32")]
     crate::process::spawn_exe_image_with_k32(CONFORMANCE_EXE.to_vec());
     // The program is done once its thread exited and its frames were reaped.
-    for _ in 0..200_000 {
+    // Interactive shell: waits on the human with no bound; everything else is bounded.
+    let max_yields: u64 = if cfg!(feature = "shell") {
+        u64::MAX
+    } else {
+        200_000
+    };
+    for _ in 0..max_yields {
         crate::sched::yield_now();
         if crate::mem::frames::free_frame_count() == before {
             kprintln!("@@TUKOS-CONFORMANCE-END");

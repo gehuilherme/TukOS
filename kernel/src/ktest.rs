@@ -132,6 +132,7 @@ const TESTS: &[(&str, TestFn)] = &[
     ("program_spawns_child", program_spawns_child),
     ("echo_reads_and_prints", echo_reads_and_prints),
     ("shell_runs_command", shell_runs_command),
+    ("shell_unknown_and_help", shell_unknown_and_help),
     ("two_modules_no_overlap", two_modules_no_overlap),
     (
         "import_resolve_rejects_bad_iat_slot",
@@ -494,6 +495,41 @@ fn shell_runs_command() -> Result<(), &'static str> {
             if crate::syscall::console_log_find(b"comando nao encontrado", 0).is_some() {
                 return Err("shell: CreateProcess(hello.exe) falhou");
             }
+            return Ok(());
+        }
+    }
+    Err("shell nao terminou/recolheu os frames")
+}
+
+/// Scripted shell session with builtins: keyboard pre-fed help, naoexiste, exit. Asserts the help listing
+/// (hello/echo/exit), the "comando nao encontrado: naoexiste" line, and that the shell exited
+/// cleanly (status 0, frames back to baseline).
+fn shell_unknown_and_help() -> Result<(), &'static str> {
+    use core::sync::atomic::Ordering;
+    if !have_both_dlls() || SHELL_EXE.is_empty() {
+        return Ok(()); // dlls/shell.exe not embedded on this host: skip.
+    }
+    while crate::kbd::try_pop_input().is_some() {}
+    crate::syscall::LAST_TERMINATE_STATUS.store(u64::MAX, Ordering::SeqCst);
+    crate::syscall::console_log_reset();
+    crate::kbd::test_push_input(b"help\nnaoexiste\nexit\n");
+    let before = crate::mem::frames::free_frame_count();
+    crate::process::spawn_exe_image_with_k32(SHELL_EXE.to_vec());
+    for _ in 0..200_000 {
+        crate::sched::yield_now();
+        let st = crate::syscall::LAST_TERMINATE_STATUS.load(Ordering::SeqCst);
+        if st != u64::MAX && crate::mem::frames::free_frame_count() == before {
+            if st != 0 {
+                return Err("shell: exit code != 0");
+            }
+            let p1 =
+                crate::syscall::console_log_find(b"tukos> ", 0).ok_or("shell: prompt ausente")?;
+            let h =
+                crate::syscall::console_log_find(b"hello", p1).ok_or("shell: help sem 'hello'")?;
+            crate::syscall::console_log_find(b"echo", p1).ok_or("shell: help sem 'echo'")?;
+            crate::syscall::console_log_find(b"exit", h).ok_or("shell: help sem 'exit'")?;
+            crate::syscall::console_log_find(b"comando nao encontrado: naoexiste\r\n", p1)
+                .ok_or("shell: mensagem de comando desconhecido ausente")?;
             return Ok(());
         }
     }

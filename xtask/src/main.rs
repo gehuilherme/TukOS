@@ -18,7 +18,9 @@ fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let result: Result<()> = match args.first().map(String::as_str) {
         Some("build") => image::build(&[]).map(|esp| println!("ESP pronta em {}", esp.display())),
-        Some("run") => image::build(&[]).and_then(|esp| qemu::run_interactive(&esp)),
+        Some("run") => conformance::build_shell_programs()
+            .and_then(|()| image::build(&["shell"]))
+            .and_then(|esp| qemu::run_interactive(&esp)),
         Some("vmware") => image::build(&[]).and_then(|esp| vmware::run(&esp)),
         Some("ktest") => ktest::run_all(),
         Some("conformance") => conformance::run_conformance(),

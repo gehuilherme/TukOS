@@ -210,6 +210,26 @@ fn run_case(
     Ok(())
 }
 
+/// Builds the DLLs and the `/MT` programs the interactive shell needs (shell.exe plus the
+/// commands it can run: hello.exe, echo.exe) so `cargo xtask run` embeds them. Without MSVC
+/// it does nothing (the kernel then embeds empty files and the shell is unavailable).
+pub fn build_shell_programs() -> crate::Result<()> {
+    if !cfg!(windows) {
+        return Ok(());
+    }
+    let Some(vcvars) = find_vcvars() else {
+        eprintln!("aviso: MSVC (vcvars64.bat) nao encontrado; o shell nao sera embutido");
+        return Ok(());
+    };
+    let root = workspace_root();
+    crate::ntdll::build()?;
+    crate::kernel32::build()?;
+    for name in ["hello", "echo", "shell"] {
+        build_crt_exe(&vcvars, &root, name)?;
+    }
+    Ok(())
+}
+
 pub fn run_conformance() -> crate::Result<()> {
     if !cfg!(windows) {
         println!("cargo:warning=conformance: so roda no Windows com MSVC; pulando");

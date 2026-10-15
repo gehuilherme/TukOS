@@ -1,5 +1,6 @@
 /* TukOS shell: reads a command line from the keyboard, runs "<cmd>.exe" from the
-   initrd via CreateProcess, waits for it, and repeats. "exit" or EOF ends it. */
+   initrd via CreateProcess, waits for it, and repeats. Builtins: help, exit (EOF also ends).
+   Only the first token is used: arguments are NOT passed to the child yet. */
 #include <windows.h>
 #include <stdio.h>
 #include <string.h>
@@ -31,6 +32,10 @@ int main(void) {
         first_token(line, cmd, sizeof cmd);
         if (cmd[0] == '\0') continue;
         if (strcmp(cmd, "exit") == 0) break;
+        if (strcmp(cmd, "help") == 0) {
+            printf("comandos: hello echo help exit\n");
+            continue;
+        }
 
         _snprintf(path, sizeof path, "%s.exe", cmd);
         path[sizeof path - 1] = '\0';
