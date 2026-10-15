@@ -1,6 +1,6 @@
 /* TukOS shell: reads a command line from the keyboard, runs "<cmd>.exe" from the
    initrd via CreateProcess, waits for it, and repeats. Builtins: help, exit (EOF also ends).
-   Only the first token is used: arguments are NOT passed to the child yet. */
+   The whole typed line is the child's command line (GetCommandLine -> argv). */
 #include <windows.h>
 #include <stdio.h>
 #include <string.h>
@@ -23,6 +23,7 @@ int main(void) {
     for (;;) {
         char cmd[CMD_MAX + 1];
         char path[CMD_MAX + 8];
+        size_t n;
         STARTUPINFOA si = { sizeof si };
         PROCESS_INFORMATION pi;
 
@@ -39,7 +40,10 @@ int main(void) {
 
         _snprintf(path, sizeof path, "%s.exe", cmd);
         path[sizeof path - 1] = '\0';
-        if (CreateProcessA(path, NULL, NULL, NULL, FALSE, 0, NULL, NULL, &si, &pi)) {
+        /* Whole line = the child's command line (trailing CR/LF/blanks trimmed). */
+        n = strlen(line);
+        while (n > 0 && (line[n-1] == '\r' || line[n-1] == '\n' || line[n-1] == ' ' || line[n-1] == '\t')) line[--n] = '\0';
+        if (CreateProcessA(path, line, NULL, NULL, FALSE, 0, NULL, NULL, &si, &pi)) {
             WaitForSingleObject(pi.hProcess, INFINITE);
             CloseHandle(pi.hThread);
             CloseHandle(pi.hProcess);

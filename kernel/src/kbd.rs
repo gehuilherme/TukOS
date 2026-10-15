@@ -43,7 +43,7 @@ pub fn poll() {
 }
 
 /// Pre-enche a fila de entrada com bytes sinteticos (testes).
-#[cfg(any(feature = "ktest", feature = "conformance_echo"))]
+#[cfg(feature = "ktest")]
 pub fn test_push_input(bytes: &[u8]) {
     let mut q = CONSOLE_INPUT.lock();
     for &b in bytes {

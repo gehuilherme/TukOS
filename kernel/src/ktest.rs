@@ -135,6 +135,7 @@ const TESTS: &[(&str, TestFn)] = &[
     ("echo_reads_and_prints", echo_reads_and_prints),
     ("shell_runs_command", shell_runs_command),
     ("shell_unknown_and_help", shell_unknown_and_help),
+    ("shell_echo_args", shell_echo_args),
     ("two_modules_no_overlap", two_modules_no_overlap),
     (
         "import_resolve_rejects_bad_iat_slot",
@@ -421,36 +422,29 @@ fn crt_hello_runs() -> Result<(), &'static str> {
 /// The `/MT` echo.exe (target/conformance/crt/echo.exe; empty if not built).
 static ECHO_EXE: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/echo.exe"));
 
-/// End to end: input ring buffer -> NtReadFile (echo) -> CRT fgets -> printf -> WriteFile.
+/// End to end: command line "echo teste" -> GetCommandLine -> CRT argv -> printf -> WriteFile.
 fn echo_reads_and_prints() -> Result<(), &'static str> {
     use core::sync::atomic::Ordering;
     if !have_both_dlls() || ECHO_EXE.is_empty() {
         return Ok(()); // dlls/echo.exe not embedded on this host: skip.
     }
-    while crate::kbd::try_pop_input().is_some() {}
     crate::syscall::LAST_TERMINATE_STATUS.store(u64::MAX, Ordering::SeqCst);
-    crate::syscall::LAST_WRITE_LEN.store(0, Ordering::SeqCst);
-    crate::syscall::echo_reset();
-    crate::kbd::test_push_input(b"teste\n");
+    crate::syscall::console_log_reset();
     let before = crate::mem::frames::free_frame_count();
-    crate::process::spawn_exe_image_with_k32(ECHO_EXE.to_vec());
+    let cmd: alloc::vec::Vec<u16> = "echo teste".encode_utf16().collect();
+    crate::process::spawn_exe_image_with_k32_cmd(ECHO_EXE.to_vec(), None, &cmd)
+        .map_err(|_| "echo: spawn falhou")?;
     for _ in 0..40000 {
         crate::sched::yield_now();
         let st = crate::syscall::LAST_TERMINATE_STATUS.load(Ordering::SeqCst);
         if st != u64::MAX {
             if st != 0 {
                 crate::kprintln!("echo terminou com status {:#x}", st);
-                return Err("echo: exit code != 0 (loader ou fgets falhou)");
+                return Err("echo: exit code != 0 (loader falhou)");
             }
-            // CRT text mode: LF becomes CRLF on stdout (21 bytes).
-            if crate::syscall::LAST_WRITE_LEN.load(Ordering::SeqCst) != 21
-                || !crate::syscall::last_write_is(b"voce digitou: teste\r\n")
-            {
-                return Err("echo: stdout diferente do esperado (voce digitou: teste)");
-            }
-            if !crate::syscall::echo_is(b"teste\n") {
-                return Err("echo: eco da linha digitada ausente/errado");
-            }
+            // printf writes "teste" then CRLF (text mode); the console log holds both.
+            crate::syscall::console_log_find(b"teste\r\n", 0)
+                .ok_or("echo: stdout diferente do esperado (teste)")?;
             if crate::mem::frames::free_frame_count() == before {
                 return Ok(());
             }
@@ -567,6 +561,45 @@ fn shell_unknown_and_help() -> Result<(), &'static str> {
             crate::syscall::console_log_find(b"exit", h).ok_or("shell: help sem 'exit'")?;
             crate::syscall::console_log_find(b"comando nao encontrado: naoexiste\r\n", p1)
                 .ok_or("shell: mensagem de comando desconhecido ausente")?;
+            return Ok(());
+        }
+    }
+    Err("shell nao terminou/recolheu os frames")
+}
+
+/// Scripted shell session with arguments: pre-fed "echo teste" + exit. The shell passes the
+/// whole line as the child's command line, so echo.exe prints "teste" (and not the old
+/// stdin-reading "voce digitou").
+fn shell_echo_args() -> Result<(), &'static str> {
+    use core::sync::atomic::Ordering;
+    if !have_both_dlls()
+        || SHELL_EXE.is_empty()
+        || crate::fs::lookup("echo.exe").is_none_or(<[u8]>::is_empty)
+    {
+        return Ok(()); // dlls/shell.exe/echo.exe not embedded on this host: skip.
+    }
+    while crate::kbd::try_pop_input().is_some() {}
+    crate::syscall::LAST_TERMINATE_STATUS.store(u64::MAX, Ordering::SeqCst);
+    crate::syscall::console_log_reset();
+    crate::kbd::test_push_input(b"echo teste\nexit\n");
+    let before = crate::mem::frames::free_frame_count();
+    crate::process::spawn_exe_image_with_k32(SHELL_EXE.to_vec());
+    for _ in 0..200_000 {
+        crate::sched::yield_now();
+        let st = crate::syscall::LAST_TERMINATE_STATUS.load(Ordering::SeqCst);
+        if st != u64::MAX && crate::mem::frames::free_frame_count() == before {
+            if st != 0 {
+                crate::kprintln!("shell terminou com status {:#x}", st);
+                return Err("shell: exit code != 0");
+            }
+            let p1 =
+                crate::syscall::console_log_find(b"tukos> ", 0).ok_or("shell: prompt ausente")?;
+            let t = crate::syscall::console_log_find(b"teste\r\n", p1)
+                .ok_or("shell: echo nao imprimiu 'teste' (argumentos nao chegaram)")?;
+            if crate::syscall::console_log_find(b"voce digitou", 0).is_some() {
+                return Err("shell: echo antigo (voce digitou) ainda em uso");
+            }
+            crate::syscall::console_log_find(b"tukos> ", t).ok_or("shell: sem 2o prompt")?;
             return Ok(());
         }
     }

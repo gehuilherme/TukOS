@@ -131,7 +131,7 @@ fn run_case(
     label: &str,
     exe: &Path,
     features: &[&str],
-    stdin: &[u8],
+    args: &[&str],
     sidecar: Option<(&str, &[u8])>,
 ) -> crate::Result<()> {
     // Optional file the program reads from its working directory (the TukOS side
@@ -141,19 +141,14 @@ fn run_case(
         std::fs::write(cwd.join(name), bytes).map_err(|e| e.to_string())?;
     }
     // Reference: the same binary on the real Windows (binds to the real DLLs).
-    let mut child = Command::new(exe)
+    let child = Command::new(exe)
+        .args(args)
         .current_dir(cwd)
-        .stdin(Stdio::piped())
+        .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit())
         .spawn()
         .map_err(|e| format!("falha ao executar {}: {e}", exe.display()))?;
-    {
-        use std::io::Write;
-        let mut si = child.stdin.take().ok_or("sem stdin do filho")?;
-        // A program that never reads stdin may exit first: ignore a broken pipe.
-        let _ = si.write_all(stdin);
-    }
     let reference = child
         .wait_with_output()
         .map_err(|e| format!("falha ao esperar {}: {e}", exe.display()))?;
@@ -258,11 +253,11 @@ pub fn run_conformance() -> crate::Result<()> {
     // shell.exe is embedded in the initrd (ktest `shell_runs_command`; no reference run:
     // it reads the keyboard until EOF).
     let _shell = build_crt_exe(&vcvars, &root, "shell")?;
-    run_case("ntdll", &hello, &["conformance"], b"", None)?;
-    run_case("kernel32", &hello32, &["conformance32"], b"", None)?;
-    run_case("heap", &heap, &["conformance_heap"], b"", None)?;
-    run_case("crt", &crt, &["conformance_crt"], b"", None)?;
-    run_case("echo", &echo, &["conformance_echo"], b"teste\n", None)?;
+    run_case("ntdll", &hello, &["conformance"], &[], None)?;
+    run_case("kernel32", &hello32, &["conformance32"], &[], None)?;
+    run_case("heap", &heap, &["conformance_heap"], &[], None)?;
+    run_case("crt", &crt, &["conformance_crt"], &[], None)?;
+    run_case("echo", &echo, &["conformance_echo"], &["teste"], None)?;
     // Same bytes as the kernel's embedded initrd `cat.txt` (kernel/src/fs.rs).
     let cat = std::fs::read(root.join("conformance").join("fileio").join("cat.txt"))
         .map_err(|e| format!("cat.txt: {e}"))?;
@@ -270,12 +265,12 @@ pub fn run_conformance() -> crate::Result<()> {
         "fileio",
         &fileio,
         &["conformance_fileio"],
-        b"",
+        &[],
         Some(("cat.txt", &cat)),
     )?;
     // parent.exe CreateProcessA("child.exe") + Wait + GetExitCodeProcess; the TukOS
     // initrd holds both exes (kernel/build.rs + fs.rs).
-    run_case("spawn", &parent, &["conformance_spawn"], b"", None)?;
+    run_case("spawn", &parent, &["conformance_spawn"], &[], None)?;
     Ok(())
 }
 

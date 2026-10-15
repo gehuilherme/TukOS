@@ -111,8 +111,6 @@ pub fn echo_is(expected: &[u8]) -> bool {
 
 /// Writes `bytes` to the console (framebuffer + serial via `kprint!`) as an echo.
 fn console_echo(bytes: &[u8]) {
-    // The echo conformance run compares stdout only: a pre-fed (piped) stdin has no echo.
-    #[cfg(not(feature = "conformance_echo"))]
     if let Ok(s) = core::str::from_utf8(bytes) {
         crate::kprint!("{s}");
     }

@@ -1,6 +1,8 @@
 //! Conformance boot mode: runs the embedded MSVC-built `.exe` through the normal
 //! user-mode loader path and lets its output reach the serial between markers.
 
+extern crate alloc;
+
 /// The conformance program built by `cargo xtask conformance` (empty if absent).
 #[cfg(not(any(
     feature = "conformance32",
@@ -27,7 +29,7 @@ static CONFORMANCE_EXE: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/crt_he
 /// With `shell` the program is the `/MT` shell.exe (reads commands from the keyboard).
 #[cfg(feature = "shell")]
 static CONFORMANCE_EXE: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/shell.exe"));
-/// With `conformance_echo` the program is the `/MT` echo.exe; stdin is pre-fed "teste\n".
+/// With `conformance_echo` the program is the `/MT` echo.exe; it runs with the command line "echo teste".
 #[cfg(feature = "conformance_echo")]
 static CONFORMANCE_EXE: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/echo.exe"));
 /// With `conformance_fileio` the program is the `/MT` fileio.exe (fopen/fread of initrd `cat.txt`).
@@ -49,14 +51,17 @@ pub fn run() -> ! {
         crate::qemu::exit(crate::qemu::ExitCode::Failure);
     }
     crate::syscall::LAST_TERMINATE_STATUS.store(u64::MAX, core::sync::atomic::Ordering::SeqCst);
-    #[cfg(feature = "conformance_echo")]
-    crate::kbd::test_push_input(b"teste\n");
     let before = crate::mem::frames::free_frame_count();
     kprintln!("@@TUKOS-CONFORMANCE-BEGIN");
     #[cfg(not(feature = "conformance32"))]
     crate::process::spawn_exe_image_with_ntdll(CONFORMANCE_EXE.to_vec());
-    #[cfg(feature = "conformance32")]
+    #[cfg(all(feature = "conformance32", not(feature = "conformance_echo")))]
     crate::process::spawn_exe_image_with_k32(CONFORMANCE_EXE.to_vec());
+    #[cfg(feature = "conformance_echo")]
+    {
+        let cmd: alloc::vec::Vec<u16> = "echo teste".encode_utf16().collect();
+        let _ = crate::process::spawn_exe_image_with_k32_cmd(CONFORMANCE_EXE.to_vec(), None, &cmd);
+    }
     // The program is done once its thread exited and its frames were reaped.
     // Interactive shell: waits on the human with no bound; everything else is bounded.
     let max_yields: u64 = if cfg!(feature = "shell") {

@@ -1,7 +1,7 @@
 #include <stdio.h>
-int main(void){
-    char buf[128];
-    if (!fgets(buf, sizeof buf, stdin)) return 1;
-    printf("voce digitou: %s", buf);
+int main(int argc, char **argv) {
+    for (int i = 1; i < argc; i++)
+        printf(i > 1 ? " %s" : "%s", argv[i]);
+    printf("\n");
     return 0;
 }
