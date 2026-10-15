@@ -890,6 +890,42 @@ pub fn build_exe_importing_kernel32() -> alloc::vec::Vec<u8> {
     )
 }
 
+/// Test `.exe` importing kernel32 only: `ReadFile(GetStdHandle(-10), buf, 32, &n, 0)`
+/// then `WriteFile(GetStdHandle(-11), buf, n, &n, 0)` (so the kernel's LAST_WRITE
+/// shows exactly what the read returned) and `ExitProcess(0)`.
+pub fn build_exe_reads_stdin() -> alloc::vec::Vec<u8> {
+    build_import_exe(
+        "kernel32.dll",
+        &["GetStdHandle", "ReadFile", "WriteFile", "ExitProcess"],
+        None,
+        None,
+        |slot, _| {
+            let mut c = alloc::vec::Vec::new();
+            c.extend_from_slice(&[0x48, 0x83, 0xEC, 0x68]); // sub rsp, 0x68
+            c.extend_from_slice(&[0xB9, 0xF6, 0xFF, 0xFF, 0xFF]); // mov ecx, -10
+            rip_rel_to(&mut c, &[0xFF, 0x15], slot[0]); // call [GetStdHandle]
+            c.extend_from_slice(&[0x48, 0x89, 0xC1]); // mov rcx, rax
+            c.extend_from_slice(&[0x48, 0x8D, 0x54, 0x24, 0x40]); // lea rdx, [rsp+0x40] (buf)
+            c.extend_from_slice(&[0x41, 0xB8, 32, 0, 0, 0]); // mov r8d, 32
+            c.extend_from_slice(&[0x4C, 0x8D, 0x4C, 0x24, 0x30]); // lea r9, [rsp+0x30] (&n)
+            c.extend_from_slice(&[0x48, 0xC7, 0x44, 0x24, 0x20, 0, 0, 0, 0]); // [rsp+0x20]=0
+            rip_rel_to(&mut c, &[0xFF, 0x15], slot[1]); // call [ReadFile]
+            c.extend_from_slice(&[0xB9, 0xF5, 0xFF, 0xFF, 0xFF]); // mov ecx, -11
+            rip_rel_to(&mut c, &[0xFF, 0x15], slot[0]); // call [GetStdHandle]
+            c.extend_from_slice(&[0x48, 0x89, 0xC1]); // mov rcx, rax
+            c.extend_from_slice(&[0x48, 0x8D, 0x54, 0x24, 0x40]); // lea rdx, [rsp+0x40]
+            c.extend_from_slice(&[0x44, 0x8B, 0x44, 0x24, 0x30]); // mov r8d, [rsp+0x30]
+            c.extend_from_slice(&[0x4C, 0x8D, 0x4C, 0x24, 0x30]); // lea r9, [rsp+0x30]
+            c.extend_from_slice(&[0x48, 0xC7, 0x44, 0x24, 0x20, 0, 0, 0, 0]); // [rsp+0x20]=0
+            rip_rel_to(&mut c, &[0xFF, 0x15], slot[2]); // call [WriteFile]
+            c.extend_from_slice(&[0x31, 0xC9]); // xor ecx, ecx
+            rip_rel_to(&mut c, &[0xFF, 0x15], slot[3]); // call [ExitProcess]
+            c.extend_from_slice(&[0x0F, 0x0B]); // ud2
+            c
+        },
+    )
+}
+
 /// Test `.exe` that calls `kernel32!TukosCloseForward(0x1234)`, which kernel32
 /// exports as a forwarder to `ntdll.NtClose` (1 arg -> 1 arg). The bogus handle makes
 /// NtClose return STATUS_INVALID_HANDLE in rax; the exe then calls

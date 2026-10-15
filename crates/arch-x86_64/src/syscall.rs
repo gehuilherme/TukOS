@@ -73,6 +73,9 @@ unsafe extern "C" {
 // rdx (a1) is already in place. rsi/rdi are CALLEE-SAVED in the Windows x64 ABI
 // (user code keeps live values in them across a syscall), so they are saved here
 // and restored before sysret; the SysV dispatch call preserves rbx/rbp/r12-r15.
+// The per-CPU user_rsp scratch is also saved on the kernel stack and restored after
+// dispatch: a blocking syscall (NtReadFile) may switch to another thread whose own
+// syscall would otherwise overwrite it.
 #[cfg(target_os = "none")]
 core::arch::global_asm!(
     r#"
@@ -87,12 +90,16 @@ tukos_syscall_entry:
     push r11
     push rsi
     push rdi
+    push qword ptr gs:[{off_user_rsp}]
+    push 0
     mov rsi, r10
     mov rdi, rax
     mov rcx, r8
     mov r8,  r9
     mov r9,  gs:[{off_user_rsp}]
     call tukos_syscall_dispatch
+    add rsp, 8
+    pop qword ptr gs:[{off_user_rsp}]
     pop rdi
     pop rsi
     pop r11

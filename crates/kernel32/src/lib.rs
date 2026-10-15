@@ -119,6 +119,17 @@ unsafe extern "system" {
         byte_offset: *const i64,
         key: *const u32,
     ) -> i32;
+    fn NtReadFile(
+        file: isize,
+        event: isize,
+        apc_routine: *const c_void,
+        apc_context: *const c_void,
+        iosb: *mut IoStatusBlock,
+        buffer: *mut u8,
+        length: u32,
+        byte_offset: *const i64,
+        key: *const u32,
+    ) -> i32;
     fn NtTerminateProcess(process: isize, status: i32) -> i32;
     fn NtClose(handle: isize) -> i32;
     fn RtlGetProcessHeap() -> *mut c_void;
@@ -220,6 +231,68 @@ pub unsafe extern "system" fn WriteFile(
         unsafe { core::ptr::write(written, iosb.information as u32) };
     }
     1
+}
+
+/// Shared body of `ReadFile`/`ReadConsoleA` over `NtReadFile`.
+unsafe fn read_via_nt(handle: isize, buf: *mut u8, len: u32, read: *mut u32) -> i32 {
+    let mut iosb = IoStatusBlock {
+        status: 0,
+        information: 0,
+    };
+    let st = unsafe {
+        NtReadFile(
+            handle,
+            0,
+            core::ptr::null(),
+            core::ptr::null(),
+            &mut iosb,
+            buf,
+            len,
+            core::ptr::null(),
+            core::ptr::null(),
+        )
+    };
+    if st < 0 {
+        if !read.is_null() {
+            unsafe { core::ptr::write(read, 0) };
+        }
+        return 0;
+    }
+    if !read.is_null() {
+        unsafe { core::ptr::write(read, iosb.information as u32) };
+    }
+    1
+}
+
+/// `ReadFile` over `NtReadFile`. On the console-input handle it blocks for a line
+/// (with echo). Overlapped I/O is not supported (ignored).
+///
+/// # Safety
+/// `buf` must be valid for `len` bytes; `read` is null or writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn ReadFile(
+    handle: isize,
+    buf: *mut u8,
+    len: u32,
+    read: *mut u32,
+    _overlapped: *mut c_void,
+) -> i32 {
+    unsafe { read_via_nt(handle, buf, len, read) }
+}
+
+/// `ReadConsoleA`: ANSI console read (chars == bytes); `_input_control` is ignored.
+///
+/// # Safety
+/// `buf` must be valid for `to_read` bytes; `read` is null or writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn ReadConsoleA(
+    handle: isize,
+    buf: *mut u8,
+    to_read: u32,
+    read: *mut u32,
+    _input_control: *mut c_void,
+) -> i32 {
+    unsafe { read_via_nt(handle, buf, to_read, read) }
 }
 
 /// `ExitProcess` over `NtTerminateProcess(NtCurrentProcess(), code)`.

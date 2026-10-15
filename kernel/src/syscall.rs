@@ -4,6 +4,8 @@
 use arch_x86_64::interrupts::IrqMutex;
 use core::sync::atomic::{AtomicU64, Ordering};
 
+extern crate alloc;
+
 pub const SYS_EXIT: u64 = 0;
 pub const SYS_WRITE_MARK: u64 = 1;
 
@@ -12,6 +14,7 @@ pub const NT_TERMINATE_PROCESS: u64 = 3;
 pub const NT_CLOSE: u64 = 4;
 pub const NT_ALLOCATE_VIRTUAL_MEMORY: u64 = 5;
 pub const NT_FREE_VIRTUAL_MEMORY: u64 = 6;
+pub const NT_READ_FILE: u64 = 7;
 #[cfg(feature = "ktest")]
 pub const SYS_SUM6: u64 = 100;
 pub const STATUS_SUCCESS: u64 = 0;
@@ -50,6 +53,94 @@ pub fn stack_arg(user_rsp: u64, index: u64) -> Option<u64> {
         .checked_add(index.checked_mul(8)?)?;
     let bytes = crate::usercopy::copy_from_user(addr, 8)?;
     Some(u64::from_le_bytes(bytes.as_slice().try_into().ok()?))
+}
+
+/// Console echo log (ktest only): everything `nt_read_file` echoed.
+#[cfg(feature = "ktest")]
+static ECHO: IrqMutex<([u8; 64], usize)> = IrqMutex::new(([0; 64], 0));
+#[cfg(feature = "ktest")]
+pub fn echo_reset() {
+    ECHO.lock().1 = 0;
+}
+#[cfg(feature = "ktest")]
+pub fn echo_is(expected: &[u8]) -> bool {
+    let g = ECHO.lock();
+    g.1 == expected.len() && g.0[..g.1] == *expected
+}
+
+/// Writes `bytes` to the console (framebuffer + serial via `kprint!`) as an echo.
+fn console_echo(bytes: &[u8]) {
+    if let Ok(s) = core::str::from_utf8(bytes) {
+        crate::kprint!("{s}");
+    }
+    #[cfg(feature = "ktest")]
+    {
+        let mut g = ECHO.lock();
+        for &b in bytes {
+            if g.1 < 64 {
+                let i = g.1;
+                g.0[i] = b;
+                g.1 += 1;
+            }
+        }
+    }
+}
+
+/// Most bytes one NtReadFile call returns (a console line is short).
+const MAX_CONSOLE_READ: usize = 4096;
+
+/// NtReadFile on the console-input handle: a blocking, line-disciplined read.
+/// Bytes come from the keyboard queue and are echoed; Backspace (0x08/0x7F) erases
+/// the last typed char of this call's line (echoing "\b \b"); Enter ends the read
+/// and is returned as '\n'; the read also ends when `len` bytes are collected.
+/// Other handles (files) are not supported yet: STATUS_INVALID_HANDLE.
+///
+/// Blocking: when the queue is empty the thread drains the i8042 itself (the tick
+/// cannot fire while the syscall runs with IF=0) and yields. No lock is held
+/// across `yield_now`: `try_pop_input` takes and releases its own lock.
+fn nt_read_file(handle: u64, iosb: u64, buf: u64, len: u64) -> u64 {
+    let obj = crate::sched::with_current_handles(|t| t.get(handle).cloned()).flatten();
+    if obj != Some(crate::object::Object::ConsoleInput) {
+        return STATUS_INVALID_HANDLE;
+    }
+    let max = core::cmp::min(len, MAX_CONSOLE_READ as u64) as usize;
+    // Validate the destination (and zero it) BEFORE consuming any input.
+    if !crate::usercopy::copy_to_user(buf, &[0u8; MAX_CONSOLE_READ][..max])
+        || !crate::usercopy::copy_to_user(iosb, &[0u8; 16])
+    {
+        return STATUS_ACCESS_VIOLATION;
+    }
+    let mut line = alloc::vec::Vec::with_capacity(max);
+    while line.len() < max {
+        let Some(b) = crate::kbd::try_pop_input() else {
+            crate::kbd::poll();
+            crate::sched::yield_now();
+            continue;
+        };
+        match b {
+            0x08 | 0x7F => {
+                if line.pop().is_some() {
+                    console_echo(b"\x08 \x08");
+                }
+            }
+            b'\n' | b'\r' => {
+                line.push(b'\n');
+                console_echo(b"\n");
+                break;
+            }
+            _ => {
+                line.push(b);
+                console_echo(&[b]);
+            }
+        }
+    }
+    let mut block = [0u8; 16];
+    block[..8].copy_from_slice(&STATUS_SUCCESS.to_le_bytes());
+    block[8..].copy_from_slice(&(line.len() as u64).to_le_bytes());
+    if !crate::usercopy::copy_to_user(buf, &line) || !crate::usercopy::copy_to_user(iosb, &block) {
+        return STATUS_ACCESS_VIOLATION;
+    }
+    STATUS_SUCCESS
 }
 
 /// Core of NtWriteFile once the stack arguments are decoded.
@@ -189,6 +280,18 @@ pub extern "C" fn dispatch(nr: u64, a0: u64, a1: u64, a2: u64, _a3: u64, _user_r
                 return STATUS_ACCESS_VIOLATION;
             };
             nt_write_file(a0, iosb, buf, len)
+        }
+        NT_READ_FILE => {
+            // NtReadFile(FileHandle, Event, ApcRoutine, ApcContext, IoStatusBlock,
+            // Buffer, Length, ByteOffset, Key): same layout as NtWriteFile.
+            let (Some(iosb), Some(buf), Some(len)) = (
+                stack_arg(_user_rsp, 0),
+                stack_arg(_user_rsp, 1),
+                stack_arg(_user_rsp, 2),
+            ) else {
+                return STATUS_ACCESS_VIOLATION;
+            };
+            nt_read_file(a0, iosb, buf, len & 0xFFFF_FFFF)
         }
         NT_ALLOCATE_VIRTUAL_MEMORY => {
             // NtAllocateVirtualMemory(Process, *Base, ZeroBits, *Size, AllocType,

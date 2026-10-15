@@ -68,6 +68,7 @@ mod tests {
             ("NtWriteFile", 2u32),
             ("NtTerminateProcess", 3),
             ("NtClose", 4),
+            ("NtReadFile", 7),
         ] {
             let e = pe
                 .exports()

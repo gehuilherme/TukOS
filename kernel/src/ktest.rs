@@ -85,6 +85,7 @@ const TESTS: &[(&str, TestFn)] = &[
     ),
     ("ntwritefile_fills_iosb", ntwritefile_fills_iosb),
     ("ntwritefile_bad_handle", ntwritefile_bad_handle),
+    ("console_read_returns_input", console_read_returns_input),
     ("exe_imports_ntdll_and_runs", exe_imports_ntdll_and_runs),
     (
         "usermode_loader_rejects_bad_iat",
@@ -1290,6 +1291,45 @@ fn exe_uses_kernel32_and_runs() -> Result<(), &'static str> {
         }
     }
     Err("o .exe que usa kernel32->ntdll nao imprimiu/saiu")
+}
+
+/// Runs the stdin-reading exe with `input` pre-filled in the keyboard queue and
+/// checks what it read back (LAST_WRITE) and what the console echoed.
+fn run_console_read(input: &[u8], want: &[u8], want_echo: &[u8]) -> Result<(), &'static str> {
+    use core::sync::atomic::Ordering;
+    while crate::kbd::try_pop_input().is_some() {}
+    crate::syscall::LAST_WRITE_LEN.store(0, Ordering::SeqCst);
+    crate::syscall::LAST_TERMINATE_STATUS.store(u64::MAX, Ordering::SeqCst);
+    crate::syscall::echo_reset();
+    crate::kbd::test_push_input(input);
+    let before = crate::mem::frames::free_frame_count();
+    crate::process::spawn_exe_image_with_k32(crate::process::build_exe_reads_stdin());
+    for _ in 0..40000 {
+        crate::sched::yield_now();
+        if crate::syscall::LAST_TERMINATE_STATUS.load(Ordering::SeqCst) != u64::MAX
+            && crate::mem::frames::free_frame_count() == before
+        {
+            if crate::syscall::LAST_WRITE_LEN.load(Ordering::SeqCst) != want.len() as u64
+                || !crate::syscall::last_write_is(want)
+            {
+                return Err("NtReadFile devolveu bytes errados");
+            }
+            if !crate::syscall::echo_is(want_echo) {
+                return Err("eco da console errado");
+            }
+            return Ok(());
+        }
+    }
+    Err("o .exe que le o stdin nao terminou")
+}
+
+fn console_read_returns_input() -> Result<(), &'static str> {
+    if !have_both_dlls() {
+        return Ok(()); // ntdll/kernel32 not embedded on this host: skip.
+    }
+    run_console_read(b"oi\n", b"oi\n", b"oi\n")?;
+    // Backspace erases the 'b' (echo "\b \b") and is not returned.
+    run_console_read(b"ab\x08c\n", b"ac\n", b"ab\x08 \x08c\n")
 }
 
 fn heap_alloc_write_free() -> Result<(), &'static str> {

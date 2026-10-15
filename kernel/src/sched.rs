@@ -159,6 +159,8 @@ pub fn spawn_user(
     let mut handles = HandleTable::new();
     let console = handles.insert(Object::Console);
     debug_assert_eq!(console, CONSOLE_HANDLE);
+    let console_in = handles.insert(Object::ConsoleInput);
+    debug_assert_eq!(console_in, crate::object::CONSOLE_INPUT_HANDLE);
     let mut guard = SCHED.lock();
     let s = guard.as_mut().expect("scheduler nao iniciado");
     assert!(

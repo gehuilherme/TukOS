@@ -14,6 +14,7 @@ const PEB_PROCESS_PARAMETERS: usize = 0x20; // PEB.ProcessParameters
 // RTL_USER_PROCESS_PARAMETERS (public winternl.h layout).
 const PARAMS_MAXIMUM_LENGTH: usize = 0x00;
 const PARAMS_LENGTH: usize = 0x04;
+const PARAMS_STANDARD_INPUT: usize = 0x20;
 const PARAMS_STANDARD_OUTPUT: usize = 0x28;
 const PARAMS_STANDARD_ERROR: usize = 0x30;
 const PARAMS_SIZE: u32 = 0x80;
@@ -144,7 +145,8 @@ pub fn setup_ldr(
 }
 
 /// Maps a page at `params_va` holding an `RTL_USER_PROCESS_PARAMETERS` whose
-/// `StandardOutput`/`StandardError` are `console` (stdin stays 0), then points
+/// `StandardOutput`/`StandardError` are `console` and `StandardInput` is the
+/// console-input handle, then points
 /// `PEB.ProcessParameters` (PEB at `peb_va`) at it. This is where a program that
 /// does not link kernel32 finds its stdout handle, as on real Windows.
 pub fn setup_process_parameters(
@@ -157,6 +159,7 @@ pub fn setup_process_parameters(
     unsafe {
         (page.add(PARAMS_MAXIMUM_LENGTH) as *mut u32).write(PARAMS_SIZE);
         (page.add(PARAMS_LENGTH) as *mut u32).write(PARAMS_SIZE);
+        (page.add(PARAMS_STANDARD_INPUT) as *mut u64).write(crate::object::CONSOLE_INPUT_HANDLE);
         (page.add(PARAMS_STANDARD_OUTPUT) as *mut u64).write(console);
         (page.add(PARAMS_STANDARD_ERROR) as *mut u64).write(console);
     }

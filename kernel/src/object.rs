@@ -8,9 +8,14 @@ use alloc::vec::Vec;
 /// Handle every user process receives for the console.
 pub const CONSOLE_HANDLE: u64 = 4;
 
+/// Handle every user process receives for console (keyboard) input; the second
+/// slot of the table, so its value is 8.
+pub const CONSOLE_INPUT_HANDLE: u64 = 8;
+
 #[derive(Clone, PartialEq, Debug)]
 pub enum Object {
     Console,
+    ConsoleInput,
 }
 
 #[derive(Default)]
