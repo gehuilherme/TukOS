@@ -140,6 +140,7 @@ const TESTS: &[(&str, TestFn)] = &[
     ("cursor_follows_mouse", cursor_follows_mouse),
     ("wm_compose_one", wm_compose_one),
     ("wm_compose_fullscreen", wm_compose_fullscreen),
+    ("wm_extreme_coords_no_panic", wm_extreme_coords_no_panic),
     ("window_paints", window_paints),
     ("gui_hello_window", gui_hello_window),
     ("window_keyboard_echo", window_keyboard_echo),
@@ -1917,6 +1918,54 @@ fn wm_compose_fullscreen() -> Result<(), &'static str> {
         return Err("wm_compose_fullscreen: desktop bg vazou (janela full-screen cobre tudo)");
     }
     cleanup();
+    Ok(())
+}
+
+const WM_OWNER_EXTREME: usize = 0x7703;
+
+/// Extreme/absurd window coordinates from user mode must NOT panic the kernel (the
+/// compositor's frame math is saturating and `create_window` rejects absurd origins).
+/// This would have caught the i32-overflow DoS in `NtUserCreateWindow`.
+fn wm_extreme_coords_no_panic() -> Result<(), &'static str> {
+    const DESKTOP_BG: u32 = 0x0020_3040;
+    if let Some(con) = crate::fbcon::FBCON.lock().as_mut() {
+        con.clear();
+    }
+    let (sw, _sh, _) = crate::fbcon::fb_info().ok_or("wm_extreme_coords: sem framebuffer")?;
+    // Absurd origins + small non-full-screen size: must be rejected cleanly (no panic).
+    for (x, y) in [
+        (i32::MAX, 0),
+        (i32::MIN, 0),
+        (0, i32::MAX),
+        (0, i32::MIN),
+        (i32::MAX, i32::MIN),
+    ] {
+        if crate::wm::create_window(WM_OWNER_EXTREME, x, y, 100, 100, 0).is_some() {
+            return Err("wm_extreme_coords: origem absurda deveria ser rejeitada");
+        }
+    }
+    // A far-but-in-range origin (fully off the right edge) is accepted and composites
+    // without panic; the frame math saturates and the window is simply clipped away.
+    let id = crate::wm::create_window(WM_OWNER_EXTREME, 2 * sw as i32, 0, 100, 100, 0)
+        .ok_or("wm_extreme_coords: janela no limite do range deveria ser aceita")?;
+    crate::wm::fill_rect_in(WM_OWNER_EXTREME, id, 0, 0, 100, 100, 0x00FF_0000);
+    crate::wm::composite();
+    // Survived (no panic) and nothing corrupted: the off-screen window drew nothing, so
+    // the screen shows only the desktop background.
+    let ok = crate::fbcon::pixel(10, 10) == Some(DESKTOP_BG);
+    crate::wm::destroy_window(id);
+    // A partially-off-screen (negative origin, in range) window still composites fine.
+    let id2 = crate::wm::create_window(WM_OWNER_EXTREME, -50, -50, 200, 200, 0)
+        .ok_or("wm_extreme_coords: janela parcialmente fora deveria ser aceita")?;
+    crate::wm::fill_rect_in(WM_OWNER_EXTREME, id2, 60, 60, 20, 20, 0x0000_FF00);
+    crate::wm::composite();
+    crate::wm::destroy_window(id2);
+    if let Some(con) = crate::fbcon::FBCON.lock().as_mut() {
+        con.clear();
+    }
+    if !ok {
+        return Err("wm_extreme_coords: framebuffer corrompido por janela off-screen");
+    }
     Ok(())
 }
 

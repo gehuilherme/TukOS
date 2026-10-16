@@ -63,6 +63,19 @@ fn clamp_size(w: u32, h: u32, sw: u32, sh: u32) -> (u32, u32) {
     (w.min(sw).max(1), h.min(sh).max(1))
 }
 
+/// Policy for a non-full-screen window's top-left: a legitimately partially-off-screen
+/// window is allowed (the blit/frame math clips it), but an absurd coordinate is
+/// rejected so the compositor's frame arithmetic can never approach `i32` extremes.
+/// The window origin must lie within `[-screen, 2*screen]` on each axis (computed in
+/// `i64` so the bound check itself never overflows).
+fn origin_in_range(x: i32, y: i32, sw: u32, sh: u32) -> bool {
+    let in1 = |v: i32, s: u32| {
+        let (v, s) = (i64::from(v), i64::from(s));
+        v >= -s && v <= 2 * s
+    };
+    in1(x, sw) && in1(y, sh)
+}
+
 impl WmState {
     fn find(&self, id: u32) -> Option<usize> {
         self.windows.iter().position(|w| w.id == id)
@@ -83,6 +96,12 @@ pub fn create_window(owner: usize, x: i32, y: i32, w: u32, h: u32, style: u32) -
     let (x, y, w, h, fullscreen) = if compat {
         (0, 0, sw, sh, true)
     } else {
+        // Reject absurd origins (DoS guard): a window entirely implausibly off-screen is
+        // refused; legitimately partially-off-screen windows (origin within [-screen,
+        // 2*screen]) are kept and clipped by the compositor.
+        if !origin_in_range(x, y, sw, sh) {
+            return None;
+        }
         let (cw, ch) = clamp_size(w, h, sw, sh);
         (x, y, cw, ch, false)
     };
@@ -263,11 +282,17 @@ pub fn composite() {
             }
             frame.blit(w.x, w.y, w.w, w.h, &w.backbuffer);
             if !w.fullscreen {
-                // 1px frame just outside the client rect.
-                frame.fill_rect(w.x - 1, w.y - 1, w.w + 2, 1, FRAME_RGB); // top
-                frame.fill_rect(w.x - 1, w.y + w.h as i32, w.w + 2, 1, FRAME_RGB); // bottom
-                frame.fill_rect(w.x - 1, w.y, 1, w.h, FRAME_RGB); // left
-                frame.fill_rect(w.x + w.w as i32, w.y, 1, w.h, FRAME_RGB); // right
+                // 1px frame just outside the client rect. Saturating arithmetic so the
+                // math can NEVER overflow regardless of the window's x,y (user-supplied).
+                let left = w.x.saturating_sub(1);
+                let top = w.y.saturating_sub(1);
+                let right = w.x.saturating_add(w.w as i32);
+                let bottom = w.y.saturating_add(w.h as i32);
+                let span = w.w.saturating_add(2);
+                frame.fill_rect(left, top, span, 1, FRAME_RGB); // top
+                frame.fill_rect(left, bottom, span, 1, FRAME_RGB); // bottom
+                frame.fill_rect(left, w.y, 1, w.h, FRAME_RGB); // left
+                frame.fill_rect(right, w.y, 1, w.h, FRAME_RGB); // right
             }
         }
     });
