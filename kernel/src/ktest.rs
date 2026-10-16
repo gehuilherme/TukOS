@@ -87,6 +87,7 @@ const TESTS: &[(&str, TestFn)] = &[
     ("ntwritefile_fills_iosb", ntwritefile_fills_iosb),
     ("ntwritefile_bad_handle", ntwritefile_bad_handle),
     ("console_read_returns_input", console_read_returns_input),
+    ("key_event_queue", key_event_queue),
     ("exe_imports_ntdll_and_runs", exe_imports_ntdll_and_runs),
     (
         "usermode_loader_rejects_bad_iat",
@@ -1534,6 +1535,69 @@ fn keyboard_poll_decodes() -> Result<(), &'static str> {
     crate::kbd::test_push_input(b"hi");
     if crate::kbd::try_pop_input() != Some(b'h') || crate::kbd::try_pop_input() != Some(b'i') {
         return Err("test_push_input falhou");
+    }
+    Ok(())
+}
+
+fn key_event_queue() -> Result<(), &'static str> {
+    use kbd::KeyEvent;
+    while crate::kbd::try_pop_key_event().is_some() {}
+    while crate::kbd::try_pop_input().is_some() {}
+    // shift-make, 'a' down, 'a' up, shift-break, Enter down
+    for sc in [0x2Au8, 0x1E, 0x9E, 0xAA, 0x1C] {
+        crate::kbd::push_scancode_byte(sc);
+    }
+    let want = [
+        KeyEvent {
+            vk: 0x10,
+            ch: 0,
+            down: true,
+        },
+        KeyEvent {
+            vk: 0x41,
+            ch: b'A' as u32,
+            down: true,
+        },
+        KeyEvent {
+            vk: 0x41,
+            ch: 0,
+            down: false,
+        },
+        KeyEvent {
+            vk: 0x10,
+            ch: 0,
+            down: false,
+        },
+        KeyEvent {
+            vk: 0x0D,
+            ch: 0x0D,
+            down: true,
+        },
+    ];
+    for w in want {
+        if crate::kbd::try_pop_key_event() != Some(w) {
+            return Err("evento de tecla inesperado");
+        }
+    }
+    if crate::kbd::try_pop_key_event().is_some() {
+        return Err("fila de eventos deveria estar vazia");
+    }
+    // O anel de console continua recebendo os caracteres (A, Enter).
+    if crate::kbd::try_pop_input() != Some(b'A') || crate::kbd::try_pop_input() != Some(b'\n') {
+        return Err("anel de console nao recebeu os caracteres");
+    }
+    // Limitada: injetar muito alem da capacidade descarta os mais antigos.
+    for _ in 0..(kbd::EventRing::CAP * 4) {
+        crate::kbd::push_scancode_byte(0x1E);
+        crate::kbd::push_scancode_byte(0x9E);
+    }
+    let mut n = 0;
+    while crate::kbd::try_pop_key_event().is_some() {
+        n += 1;
+    }
+    while crate::kbd::try_pop_input().is_some() {}
+    if n != kbd::EventRing::CAP {
+        return Err("fila de eventos nao e limitada");
     }
     Ok(())
 }

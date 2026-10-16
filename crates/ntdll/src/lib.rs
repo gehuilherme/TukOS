@@ -214,6 +214,13 @@ pub extern "system" fn NtGdiTextOut() {
     core::arch::naked_asm!("mov r10, rcx", "mov eax, 16", "syscall", "ret");
 }
 
+// NT_USER_GET_KEY_EVENT = 17: blocking raw key event (3 x u32: vk, ch, flags bit0 = down).
+#[unsafe(naked)]
+#[unsafe(no_mangle)]
+pub extern "system" fn NtUserGetKeyEvent() {
+    core::arch::naked_asm!("mov r10, rcx", "mov eax, 17", "syscall", "ret");
+}
+
 /// `RtlExitUserProcess(code)`: a real function (NOT a bare forwarder to the
 /// 2-arg `NtTerminateProcess`) that terminates the current process with `code`.
 #[unsafe(no_mangle)]

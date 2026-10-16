@@ -2,7 +2,7 @@
 
 use arch_x86_64::interrupts::IrqMutex;
 use arch_x86_64::port::inb;
-use kbd::{KbdState, RingBuffer};
+use kbd::{EventRing, KbdState, KeyEvent, RingBuffer};
 
 const DATA_PORT: u16 = 0x60;
 const STATUS_PORT: u16 = 0x64;
@@ -12,14 +12,28 @@ const STATUS_AUX: u8 = 1 << 5;
 const MAX_PER_TICK: usize = 8;
 
 static CONSOLE_INPUT: IrqMutex<RingBuffer> = IrqMutex::new(RingBuffer::new());
+/// Fila de eventos crus de tecla (GUI); limitada, descarta o mais antigo quando cheia.
+static KEY_EVENTS: IrqMutex<EventRing> = IrqMutex::new(EventRing::new());
 static STATE: IrqMutex<KbdState> = IrqMutex::new(KbdState { shift: false });
 
-/// Decodifica um byte de scancode e, se gerar um caractere, enfileira-o.
+/// Decodifica um byte de scancode: alimenta o anel de caracteres do console E a
+/// fila de eventos crus de tecla (o mesmo estado de shift serve aos dois).
 pub fn push_scancode_byte(sc: u8) {
-    let ch = kbd::decode(sc, &mut STATE.lock());
+    let (ch, ev) = {
+        let mut st = STATE.lock();
+        (kbd::decode(sc, &mut st), kbd::decode_event(sc, &mut st))
+    };
     if let Some(c) = ch {
         CONSOLE_INPUT.lock().push(c);
     }
+    if let Some(e) = ev {
+        KEY_EVENTS.lock().push(e);
+    }
+}
+
+/// Retira um evento de tecla da fila, sem bloquear.
+pub fn try_pop_key_event() -> Option<KeyEvent> {
+    KEY_EVENTS.lock().pop()
 }
 
 /// Retira um byte da fila de entrada do console, sem bloquear.

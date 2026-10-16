@@ -33,6 +33,9 @@ pub const NT_GDI_GET_FB_INFO: u64 = 14;
 pub const NT_GDI_FILL_RECT: u64 = 15;
 /// `(x, y, str_ptr, len, fg, bg)`; fg/bg on the user stack.
 pub const NT_GDI_TEXT_OUT: u64 = 16;
+/// `(out_key_event_ptr)`: BLOCKS until a key event; writes `KeyEventAbi { vk, ch, flags }`
+/// (3 x u32, flags bit0 = down).
+pub const NT_USER_GET_KEY_EVENT: u64 = 17;
 /// Max bytes accepted by NtGdiTextOut.
 const GDI_TEXT_MAX: u64 = 4096;
 #[cfg(feature = "ktest")]
@@ -589,6 +592,31 @@ fn nt_gdi_get_fb_info(out: u64) -> u64 {
     }
 }
 
+/// NtUserGetKeyEvent: blocking pop of the raw key-event queue. Mirrors `nt_read_file`:
+/// drains the i8042 itself and yields; no lock is held across `yield_now`.
+fn nt_user_get_key_event(out: u64) -> u64 {
+    // Validate the destination BEFORE consuming an event.
+    if !crate::usercopy::copy_to_user(out, &[0u8; 12]) {
+        return STATUS_ACCESS_VIOLATION;
+    }
+    let ev = loop {
+        if let Some(e) = crate::kbd::try_pop_key_event() {
+            break e;
+        }
+        crate::kbd::poll();
+        crate::sched::yield_now();
+    };
+    let mut buf = [0u8; 12];
+    buf[0..4].copy_from_slice(&(ev.vk as u32).to_le_bytes());
+    buf[4..8].copy_from_slice(&ev.ch.to_le_bytes());
+    buf[8..12].copy_from_slice(&(ev.down as u32).to_le_bytes());
+    if crate::usercopy::copy_to_user(out, &buf) {
+        STATUS_SUCCESS
+    } else {
+        STATUS_ACCESS_VIOLATION
+    }
+}
+
 fn nt_gdi_text_out(x: u64, y: u64, ptr: u64, len: u64, fg: u64, bg: u64) -> u64 {
     let len = (len as u32 as u64).min(GDI_TEXT_MAX);
     let bytes = if len == 0 {
@@ -670,6 +698,7 @@ pub extern "C" fn dispatch(nr: u64, a0: u64, a1: u64, a2: u64, _a3: u64, _user_r
             };
             nt_gdi_text_out(a0, a1, a2, _a3, fg, bg)
         }
+        NT_USER_GET_KEY_EVENT => nt_user_get_key_event(a0),
         NT_WAIT => nt_wait(a0),
         NT_QUERY_EXIT_CODE => nt_query_exit_code(a0, a1),
         NT_ALLOCATE_VIRTUAL_MEMORY => {
