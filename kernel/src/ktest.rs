@@ -1794,6 +1794,7 @@ fn cursor_follows_mouse() -> Result<(), &'static str> {
     while crate::kbd::try_pop_input_event().is_some() {}
     fill_rect(0, 0, w, h, bg);
     // Negativo: com o cursor DESABILITADO, pacotes de mouse nao tocam o framebuffer.
+    cursor_disable();
     for _ in 0..6 {
         for b in [0xD8, 0, 0] {
             crate::kbd::route_byte(b, true);
