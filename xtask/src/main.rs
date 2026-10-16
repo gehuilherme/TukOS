@@ -14,15 +14,16 @@ mod vmware;
 
 pub type Result<T> = std::result::Result<T, String>;
 
-const USAGE: &str = "uso: cargo xtask <build|run [gui]|vmware [gui]|ktest|test|ntdll|kernel32|gdi32|user32|conformance>";
+const USAGE: &str = "uso: cargo xtask <build|run [gui|gui-type]|vmware [gui|gui-type]|ktest|test|ntdll|kernel32|gdi32|user32|conformance>";
 
 /// Boot mode for `run`/`vmware`: `shell` (default) or `gui` (`cargo xtask run gui`:
-/// the hello_win Win32 GUI demo is the initial process).
+/// the hello_win Win32 GUI demo is the initial process) or `gui-type` (the interactive
+/// keyboard typing window test_type.exe).
 fn boot_feature(args: &[String]) -> &'static str {
-    if args.get(1).map(String::as_str) == Some("gui") {
-        "gui"
-    } else {
-        "shell"
+    match args.get(1).map(String::as_str) {
+        Some("gui") => "gui",
+        Some("gui-type") => "gui_type",
+        _ => "shell",
     }
 }
 

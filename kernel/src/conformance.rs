@@ -28,8 +28,11 @@ static CONFORMANCE_EXE: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/confor
 ))]
 static CONFORMANCE_EXE: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/crt_hello.exe"));
 /// With `gui` the program is the GUI demo hello_win.exe (user32/gdi32), run by `spawn_exe_image_with_gui`.
-#[cfg(feature = "gui")]
+#[cfg(all(feature = "gui", not(feature = "gui_type")))]
 static CONFORMANCE_EXE: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/hello_win.exe"));
+/// With `gui_type` (implies `gui`) the program is the interactive typing window test_type.exe.
+#[cfg(feature = "gui_type")]
+static CONFORMANCE_EXE: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/test_type.exe"));
 /// With `shell` the program is the `/MT` shell.exe (reads commands from the keyboard).
 #[cfg(feature = "shell")]
 static CONFORMANCE_EXE: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/shell.exe"));

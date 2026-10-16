@@ -26,8 +26,19 @@ static LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
         return 0;
     }
     case WM_CHAR: {
-        if (w == '\r') {
+        if (w == '\r' || w == 0x1B) {
             PostQuitMessage(0);
+        } else if (w == 0x08) {
+            if (g_n > 0) {
+                char sp = ' ';
+                HDC dc = GetDC(h);
+                g_n--;
+                SetBkMode(dc, OPAQUE);
+                SetBkColor(dc, RGB(32, 32, 48));
+                SetTextColor(dc, RGB(255, 255, 255));
+                TextOutA(dc, 20 + 16 * g_n, 25, &sp, 1);
+                ReleaseDC(h, dc);
+            }
         } else {
             char c = (char)w;
             HDC dc = GetDC(h);
