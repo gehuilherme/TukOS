@@ -137,6 +137,7 @@ const TESTS: &[(&str, TestFn)] = &[
     ("program_spawns_child", program_spawns_child),
     ("echo_reads_and_prints", echo_reads_and_prints),
     ("cursor_save_under", cursor_save_under),
+    ("cursor_follows_mouse", cursor_follows_mouse),
     ("window_paints", window_paints),
     ("gui_hello_window", gui_hello_window),
     ("window_keyboard_echo", window_keyboard_echo),
@@ -1784,6 +1785,41 @@ fn cursor_save_under() -> Result<(), &'static str> {
         con.clear();
     }
     Ok(())
+}
+
+fn cursor_follows_mouse() -> Result<(), &'static str> {
+    use crate::fbcon::{cursor_disable, cursor_enable, fb_info, fill_rect, pixel};
+    let (w, h, _) = fb_info().ok_or("sem framebuffer")?;
+    let (bg, white) = (0x0011_2233, 0x00FF_FFFF);
+    while crate::kbd::try_pop_input_event().is_some() {}
+    fill_rect(0, 0, w, h, bg);
+    cursor_enable();
+    // Satura para (0,0): o cursor aparece la.
+    for _ in 0..6 {
+        for b in [0xD8, 0, 0] {
+            crate::kbd::route_byte(b, true);
+        }
+    }
+    if pixel(1, 2) != Some(white) {
+        return Err("cursor nao apareceu em (0,0)");
+    }
+    // Move para (100,80): dx=+100, dy=-80 (para baixo 80).
+    for b in [0x28, 100, (-80i8) as u8] {
+        crate::kbd::route_byte(b, true);
+    }
+    let r = if pixel(101, 82) != Some(white) {
+        Err("sprite nao seguiu o mouse para (100,80)")
+    } else if pixel(1, 2) != Some(bg) {
+        Err("rastro em (0,0)")
+    } else {
+        Ok(())
+    };
+    cursor_disable();
+    if let Some(con) = crate::fbcon::FBCON.lock().as_mut() {
+        con.clear();
+    }
+    while crate::kbd::try_pop_input_event().is_some() {}
+    r
 }
 
 fn timer_ticks_advance() -> Result<(), &'static str> {

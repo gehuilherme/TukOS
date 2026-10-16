@@ -54,11 +54,20 @@ pub fn push_mouse_byte(b: u8) {
     let (w, h) = crate::fbcon::fb_info()
         .map(|(w, h, _)| (w as i32, h as i32))
         .unwrap_or((i32::MAX, i32::MAX));
-    let evs = MOUSE.lock().apply(pkt, w, h);
-    let mut q = INPUT_EVENTS.lock();
-    for e in evs.into_iter().flatten() {
-        q.push(e);
+    // O guard do MOUSE e solto ao fim do statement: nenhum lock fica preso
+    // quando o FBCON for tomado em cursor_move_to.
+    let (evs, pos) = {
+        let mut m = MOUSE.lock();
+        let evs = m.apply(pkt, w, h);
+        (evs, (m.x, m.y))
+    };
+    {
+        let mut q = INPUT_EVENTS.lock();
+        for e in evs.into_iter().flatten() {
+            q.push(e);
+        }
     }
+    crate::fbcon::cursor_move_to(pos.0.max(0) as u32, pos.1.max(0) as u32);
 }
 
 /// Roteia um byte do i8042 pelo bit AUXDATA.

@@ -64,6 +64,14 @@ pub fn run() -> ! {
     let before = crate::mem::frames::free_frame_count();
     kprintln!("@@TUKOS-CONFORMANCE-BEGIN");
     #[cfg(feature = "gui")]
+    {
+        // Cursor de mouse visivel so no boot GUI (os ktests chamam o spawn direto).
+        crate::fbcon::cursor_enable();
+        if let Some((w, h, _)) = crate::fbcon::fb_info() {
+            crate::fbcon::cursor_show_at(w / 2, h / 2);
+        }
+    }
+    #[cfg(feature = "gui")]
     if crate::process::spawn_exe_image_with_gui(CONFORMANCE_EXE.to_vec(), None).is_err() {
         kprintln!("@@TUKOS-PANIC gui: spawn falhou (DLLs/exe nao embutidos?)");
         crate::qemu::exit(crate::qemu::ExitCode::Failure);
