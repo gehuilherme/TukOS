@@ -1793,6 +1793,18 @@ fn cursor_follows_mouse() -> Result<(), &'static str> {
     let (bg, white) = (0x0011_2233, 0x00FF_FFFF);
     while crate::kbd::try_pop_input_event().is_some() {}
     fill_rect(0, 0, w, h, bg);
+    // Negativo: com o cursor DESABILITADO, pacotes de mouse nao tocam o framebuffer.
+    for _ in 0..6 {
+        for b in [0xD8, 0, 0] {
+            crate::kbd::route_byte(b, true);
+        }
+    }
+    for b in [0x28, 100, (-80i8) as u8] {
+        crate::kbd::route_byte(b, true);
+    }
+    if pixel(1, 2) != Some(bg) || pixel(101, 82) != Some(bg) {
+        return Err("cursor desabilitado desenhou no framebuffer");
+    }
     cursor_enable();
     // Satura para (0,0): o cursor aparece la.
     for _ in 0..6 {

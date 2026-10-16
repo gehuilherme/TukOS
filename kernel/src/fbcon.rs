@@ -332,6 +332,9 @@ pub fn cursor_disable() {
 #[allow(dead_code)]
 pub fn cursor_show_at(x: u32, y: u32) {
     if let Some(con) = FBCON.lock().as_mut() {
+        if !con.cursor_enabled {
+            return;
+        }
         con.cursor_hide_for_draw();
         con.cursor_x = x as usize;
         con.cursor_y = y as usize;
