@@ -141,6 +141,7 @@ const TESTS: &[(&str, TestFn)] = &[
     ("wm_compose_one", wm_compose_one),
     ("wm_compose_fullscreen", wm_compose_fullscreen),
     ("wm_extreme_coords_no_panic", wm_extreme_coords_no_panic),
+    ("window_positioned_paints", window_positioned_paints),
     ("window_paints", window_paints),
     ("gui_hello_window", gui_hello_window),
     ("window_keyboard_echo", window_keyboard_echo),
@@ -521,6 +522,72 @@ fn window_paints() -> Result<(), &'static str> {
         }
     }
     Err("window_paints nao terminou/recolheu os frames")
+}
+
+/// The positioned-window test program (target/conformance/gui/test_pos.exe).
+static TEST_POS_EXE: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/test_pos.exe"));
+
+/// test_pos.exe creates a 240x160 window at screen (120,90) and fills its client rect
+/// (10,10)-(60,60) with RGB(255,0,0) (framebuffer 0x00FF0000). Process exit frees the
+/// backbuffer without recompositing, so after it exits the last composite (from EndPaint)
+/// is still on screen: the red rect must show at SCREEN (130..180, 100..150), black
+/// client around it inside the window, and the desktop background outside the window.
+fn window_positioned_paints() -> Result<(), &'static str> {
+    use core::sync::atomic::Ordering;
+    const RED: u32 = 0x00FF_0000;
+    const DESKTOP_BG: u32 = 0x0020_3040;
+    if !crate::process::have_gui_dlls() || TEST_POS_EXE.is_empty() {
+        return Ok(()); // DLLs/test_pos.exe not embedded on this host: skip.
+    }
+    if let Some(con) = crate::fbcon::FBCON.lock().as_mut() {
+        con.clear();
+    }
+    crate::syscall::LAST_TERMINATE_STATUS.store(u64::MAX, Ordering::SeqCst);
+    let before = crate::mem::frames::free_frame_count();
+    crate::process::spawn_exe_image_with_gui(TEST_POS_EXE.to_vec(), None)
+        .map_err(|_| "window_positioned_paints: spawn falhou")?;
+    for _ in 0..40000 {
+        crate::sched::yield_now();
+        let st = crate::syscall::LAST_TERMINATE_STATUS.load(Ordering::SeqCst);
+        if st != u64::MAX {
+            if (0xC000_7001..=0xC000_700A).contains(&st) {
+                crate::kprintln!("window_positioned_paints: loader status {:#x}", st);
+                return Err("window_positioned_paints: o loader morreu (import nao resolvido?)");
+            }
+            if st != 0 {
+                crate::kprintln!("window_positioned_paints terminou com status {:#x}", st);
+                return Err("window_positioned_paints: exit code != 0");
+            }
+            // Client (20,20) -> screen (140,110): red.
+            if crate::fbcon::pixel(140, 110) != Some(RED) {
+                return Err("window_positioned_paints: retangulo nao aparece na posicao de tela");
+            }
+            // The same coordinates WITHOUT the window offset must not be red (client 0,0
+            // drawn at screen 0,0 would be the old single-window bug).
+            if crate::fbcon::pixel(20, 20) == Some(RED) {
+                return Err("window_positioned_paints: pintou na origem da tela");
+            }
+            // Inside the window but outside the rect: the window's black backbuffer.
+            if crate::fbcon::pixel(300, 200) != Some(0) {
+                return Err("window_positioned_paints: cliente fora do retangulo nao e preto");
+            }
+            // Outside the window: desktop background.
+            if crate::fbcon::pixel(50, 50) != Some(DESKTOP_BG)
+                || crate::fbcon::pixel(500, 400) != Some(DESKTOP_BG)
+            {
+                return Err(
+                    "window_positioned_paints: fundo da area de trabalho ausente fora da janela",
+                );
+            }
+            if crate::mem::frames::free_frame_count() == before {
+                if let Some(con) = crate::fbcon::FBCON.lock().as_mut() {
+                    con.clear();
+                }
+                return Ok(());
+            }
+        }
+    }
+    Err("window_positioned_paints nao terminou/recolheu os frames")
 }
 
 /// The GUI demo (target/conformance/gui/hello_win.exe; empty if not built).

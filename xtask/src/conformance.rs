@@ -146,6 +146,7 @@ pub fn build_gui_test(root: &Path) -> crate::Result<()> {
         "test_type",
         "test_click",
         "paint_win",
+        "test_pos",
     ] {
         let src = root.join("gui").join(name).join(format!("{name}.c"));
         let bat = outdir.join(format!("build-{name}.bat"));

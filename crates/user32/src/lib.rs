@@ -1,6 +1,6 @@
-//! TukOS user32.dll: a single-window shim with a message loop. Painting goes to
+//! TukOS user32.dll: a small multi-window shim with a message loop. Painting goes to
 //! the kernel through the `NtGdi*` syscalls (the framebuffer is never mapped into
-//! user space); the window's client area is the whole screen.
+//! user space); each window draws into its own kernel backbuffer (HDC carries the window id).
 //!
 //! Signatures and struct layouts follow the public winuser.h/windef.h documentation.
 //! HWND/HDC/HBRUSH are opaque handles. The only import is `ntdll.dll` (`raw-dylib`):
@@ -8,10 +8,16 @@
 //! gdi32 brush carries), so it never needs to call into gdi32, and the loader binds
 //! the GUI exe's gdi32/kernel32 imports to those DLLs directly.
 //!
-//! SINGLE-WINDOW / SINGLE-THREAD MODEL: a TukOS process has exactly one user thread,
-//! so all window state lives in process-global statics with no locking (the existing
-//! kernel32/ntdll make the same assumption). One window class, one window, one message
-//! queue.
+//! SINGLE-THREAD MODEL: a TukOS process has exactly one user thread, so all window
+//! state lives in process-global statics with no locking (the existing kernel32/ntdll
+//! make the same assumption). A fixed table of classes (name -> WndProc) and of windows
+//! (hwnd = kernel window id -> WndProc), one message queue. HDC = `DC_TAG | window id`.
+//!
+//! CreateWindowExA COMPAT RULE: if `X`, `Y`, `nWidth` or `nHeight` is `CW_USEDEFAULT`
+//! (what every pre-Plano-25 GUI program passes) the window is created with the kernel's
+//! `STYLE_COMPAT` flag = full-screen at the origin, no frame (identical pixels to the old
+//! single-window model). Any explicit position/size is honoured by the kernel (a size
+//! >= the screen is full-screen there too).
 //!
 //! `GetMessageA` is BLOCKING (Plano 22; it replaces Plano 21's non-blocking behaviour,
 //! where an empty queue meant `WM_QUIT`). Priority order: (1) `PostQuitMessage` was
@@ -85,6 +91,13 @@ unsafe extern "system" {
     //                       mouse = [1, x, y, buttons (bit0 L, bit1 R, bit2 M), kind]
     // with kind 0 Move, 1/2 left down/up, 3/4 right down/up, 5/6 middle down/up.
     fn NtUserGetInputEvent(out: *mut u32) -> i32;
+    // NtUserCreateWindow(x, y, w, h, style, out_hwnd) (syscall 19): style bit0 = compat
+    // full-screen; writes the window id (u64) to out_hwnd.
+    fn NtUserCreateWindow(x: i32, y: i32, w: u32, h: u32, style: u32, out: *mut u64) -> i32;
+    // NtUserDestroyWindow(hwnd) (syscall 20).
+    fn NtUserDestroyWindow(hwnd: u32) -> i32;
+    // NtUserFlushWindow(hwnd) (syscall 21): composites the windows onto the screen.
+    fn NtUserFlushWindow(hwnd: u32) -> i32;
 }
 
 pub type HWND = isize;
@@ -124,9 +137,23 @@ const MK_LBUTTON: usize = 0x0001;
 const MK_RBUTTON: usize = 0x0002;
 const MK_MBUTTON: usize = 0x0010;
 
-// Opaque handle sentinels (non-null, process-unique).
-const THE_HWND: HWND = 0x00AB_0001;
-const SCREEN_HDC: HDC = 0x00DC_0001;
+// CreateWindow constants (winuser.h) and the kernel's compat style flag.
+const CW_USEDEFAULT: i32 = i32::MIN; // 0x80000000
+const STYLE_COMPAT: u32 = 1;
+
+// Opaque handle encodings. hwnd == the kernel window id. HDC = DC_TAG | window id
+// (id 0 = the implicit full-screen window); kept in sync with crates/gdi32/src/lib.rs.
+const DC_TAG: isize = 0x4400_0000;
+fn dc_for(hwnd: HWND) -> HDC {
+    DC_TAG | (hwnd & 0x00FF_FFFF)
+}
+fn window_id_of_dc(hdc: HDC) -> u32 {
+    if hdc & !0x00FF_FFFF == DC_TAG {
+        (hdc & 0x00FF_FFFF) as u32
+    } else {
+        0
+    }
+}
 const DUMMY_CURSOR: HCURSOR = 0x00CC_0001;
 const DUMMY_ICON: HICON = 0x00EE_0001;
 
@@ -193,12 +220,14 @@ const WNDCLASS_LPFNWNDPROC: usize = 8;
 
 #[derive(Clone, Copy)]
 struct Queued {
+    hwnd: HWND,
     message: u32,
     wparam: WPARAM,
     lparam: LPARAM,
 }
 
 const NO_MSG: Queued = Queued {
+    hwnd: 0,
     message: 0,
     wparam: 0,
     lparam: 0,
@@ -207,8 +236,28 @@ const NO_MSG: Queued = Queued {
 const QCAP: usize = 16; // power of two: see the mask in `post`/`take`
 const QMASK: usize = QCAP - 1;
 
-struct State {
+const MAX_CLASSES: usize = 16;
+const MAX_WINDOWS: usize = 32;
+const CLASS_NAME_MAX: usize = 32;
+
+#[derive(Clone, Copy)]
+struct Class {
+    used: bool,
+    name: [u8; CLASS_NAME_MAX],
     wndproc: usize,
+}
+
+#[derive(Clone, Copy)]
+struct Win {
+    hwnd: HWND, // 0 = free slot
+    wndproc: usize,
+}
+
+struct State {
+    classes: [Class; MAX_CLASSES],
+    /// WndProc of the most recently registered class (fallback when a class name is not found).
+    last_wndproc: usize,
+    windows: [Win; MAX_WINDOWS],
     queue: [Queued; QCAP],
     head: usize,
     tail: usize,
@@ -223,7 +272,16 @@ struct State {
 }
 
 static mut STATE: State = State {
-    wndproc: 0,
+    classes: [Class {
+        used: false,
+        name: [0; CLASS_NAME_MAX],
+        wndproc: 0,
+    }; MAX_CLASSES],
+    last_wndproc: 0,
+    windows: [Win {
+        hwnd: 0,
+        wndproc: 0,
+    }; MAX_WINDOWS],
     queue: [NO_MSG; QCAP],
     head: 0,
     tail: 0,
@@ -240,7 +298,7 @@ fn state() -> &'static mut State {
 
 /// Enqueues a message (drops it silently if the tiny queue is full; the deterministic
 /// single-window flow never enqueues more than a couple at a time).
-fn post(message: u32, wparam: WPARAM, lparam: LPARAM) {
+fn post(hwnd: HWND, message: u32, wparam: WPARAM, lparam: LPARAM) {
     unsafe {
         let s = &mut *core::ptr::addr_of_mut!(STATE);
         // Masking with QMASK (QCAP is a power of two) keeps every index provably < QCAP,
@@ -250,6 +308,7 @@ fn post(message: u32, wparam: WPARAM, lparam: LPARAM) {
             return;
         }
         s.queue[s.tail & QMASK] = Queued {
+            hwnd,
             message,
             wparam,
             lparam,
@@ -271,29 +330,74 @@ fn take() -> Option<Queued> {
     }
 }
 
-fn set_wndproc(p: usize) {
-    unsafe { (*core::ptr::addr_of_mut!(STATE)).wndproc = p };
-}
-
-fn get_wndproc() -> usize {
-    unsafe { (*core::ptr::addr_of!(STATE)).wndproc }
-}
-
-/// `(width, height)` of the screen (the window's client area), 0,0 if unavailable.
-fn screen_size() -> (u32, u32) {
+/// `(width, height)` of the window's client area, 0,0 if unavailable.
+fn client_size(window_id: u32) -> (u32, u32) {
     let mut info = [0u32; 3];
-    // Task 1: single-window compat — window id 0 is the process's implicit full-screen
-    // window (Task 2 threads the real hwnd here for multi-window).
-    if unsafe { NtGdiGetFbInfo(0, info.as_mut_ptr()) } >= 0 {
+    if unsafe { NtGdiGetFbInfo(window_id, info.as_mut_ptr()) } >= 0 {
         (info[0], info[1])
     } else {
         (0, 0)
     }
 }
 
+/// Copies a NUL-terminated ANSI class name (lowercased) into a fixed buffer. A pointer
+/// below 0x10000 is an ATOM (MAKEINTATOM), not a string: it yields an empty name.
+fn read_class_name(p: *const u8) -> [u8; CLASS_NAME_MAX] {
+    let mut out = [0u8; CLASS_NAME_MAX];
+    if (p as usize) < 0x1_0000 {
+        return out;
+    }
+    let mut i = 0;
+    while i < CLASS_NAME_MAX - 1 {
+        let c = unsafe { *p.add(i) };
+        if c == 0 {
+            break;
+        }
+        out[i] = c.to_ascii_lowercase();
+        i += 1;
+    }
+    out
+}
+
+/// WndProc registered for the class `name`, falling back to the last registered class.
+fn find_class_proc(name: &[u8; CLASS_NAME_MAX]) -> usize {
+    let s = state();
+    for c in s.classes.iter() {
+        if c.used && c.name == *name {
+            return c.wndproc;
+        }
+    }
+    s.last_wndproc
+}
+
+/// WndProc of window `hwnd` (0 if unknown).
+fn wndproc_of(hwnd: HWND) -> usize {
+    let s = state();
+    for w in s.windows.iter() {
+        if w.hwnd != 0 && w.hwnd == hwnd {
+            return w.wndproc;
+        }
+    }
+    0
+}
+
+/// The window input is routed to: the most recently created live one (Task 3 adds focus).
+fn input_target() -> HWND {
+    let s = state();
+    let mut best = 0;
+    for w in s.windows.iter() {
+        if w.hwnd != 0 {
+            best = w.hwnd;
+        }
+    }
+    best
+}
+
 // --- window class / creation -------------------------------------------------------
 
-/// `RegisterClassA`: stores the class WndProc (single class). Returns a nonzero ATOM.
+const WNDCLASS_LPSZCLASSNAME: usize = 64;
+
+/// `RegisterClassA`: stores the class WndProc under its name. Returns a nonzero ATOM.
 #[unsafe(no_mangle)]
 #[allow(clippy::not_unsafe_ptr_arg_deref)] // Win32 ABI: raw pointer from the caller
 pub extern "system" fn RegisterClassA(wnd_class: *const u8) -> ATOM {
@@ -302,8 +406,32 @@ pub extern "system" fn RegisterClassA(wnd_class: *const u8) -> ATOM {
     }
     let proc =
         unsafe { core::ptr::read_unaligned(wnd_class.add(WNDCLASS_LPFNWNDPROC) as *const usize) };
-    set_wndproc(proc);
-    1
+    let name_ptr = unsafe {
+        core::ptr::read_unaligned(wnd_class.add(WNDCLASS_LPSZCLASSNAME) as *const *const u8)
+    };
+    let name = read_class_name(name_ptr);
+    let s = state();
+    s.last_wndproc = proc;
+    // Re-registering a name replaces it; otherwise take the first free slot.
+    let mut slot = None;
+    for (i, c) in s.classes.iter().enumerate() {
+        if c.used && c.name == name {
+            slot = Some(i);
+            break;
+        }
+        if !c.used && slot.is_none() {
+            slot = Some(i);
+        }
+    }
+    let Some(i) = slot else {
+        return 0;
+    };
+    s.classes[i] = Class {
+        used: true,
+        name,
+        wndproc: proc,
+    };
+    (i + 1) as ATOM
 }
 
 /// `RegisterClassExA`: `lpfnWndProc` is at the same offset 8 (after cbSize+style).
@@ -313,25 +441,60 @@ pub extern "system" fn RegisterClassExA(wnd_class_ex: *const u8) -> ATOM {
     RegisterClassA(wnd_class_ex)
 }
 
-/// `CreateWindowExA`: creates the one window (client area = whole screen). Returns a
-/// non-null opaque HWND.
+/// `CreateWindowExA`: creates a kernel window (see the module header for the compat
+/// rule) and records `{hwnd, class WndProc}`. Returns the HWND, or NULL on failure.
 #[unsafe(no_mangle)]
 #[allow(clippy::too_many_arguments)]
 pub extern "system" fn CreateWindowExA(
     _ex_style: u32,
-    _class_name: *const u8,
+    class_name: *const u8,
     _window_name: *const u8,
     _style: u32,
-    _x: i32,
-    _y: i32,
-    _w: i32,
-    _h: i32,
+    x: i32,
+    y: i32,
+    w: i32,
+    h: i32,
     _parent: HWND,
     _menu: HMENU,
     _instance: HINSTANCE,
     _param: *const u8,
 ) -> HWND {
-    THE_HWND
+    let compat =
+        x == CW_USEDEFAULT || y == CW_USEDEFAULT || w == CW_USEDEFAULT || h == CW_USEDEFAULT;
+    let style = if compat { STYLE_COMPAT } else { 0 };
+    let mut id: u64 = 0;
+    let st = unsafe { NtUserCreateWindow(x, y, w.max(1) as u32, h.max(1) as u32, style, &mut id) };
+    if st < 0 || id == 0 {
+        return 0;
+    }
+    let proc = find_class_proc(&read_class_name(class_name));
+    let s = state();
+    for slot in s.windows.iter_mut() {
+        if slot.hwnd == 0 {
+            *slot = Win {
+                hwnd: id as HWND,
+                wndproc: proc,
+            };
+            return id as HWND;
+        }
+    }
+    // Table full (cannot happen while it matches the kernel cap): undo.
+    unsafe { NtUserDestroyWindow(id as u32) };
+    0
+}
+
+/// `DestroyWindow`: destroys the kernel window and forgets it. Returns TRUE if it existed.
+#[unsafe(no_mangle)]
+pub extern "system" fn DestroyWindow(hwnd: HWND) -> BOOL {
+    let s = state();
+    for slot in s.windows.iter_mut() {
+        if hwnd != 0 && slot.hwnd == hwnd {
+            slot.hwnd = 0;
+            unsafe { NtUserDestroyWindow(hwnd as u32) };
+            return 1;
+        }
+    }
+    0
 }
 
 /// `CreateWindowA`: `CreateWindowExA` without `dwExStyle`.
@@ -368,15 +531,15 @@ pub extern "system" fn CreateWindowA(
 
 /// `ShowWindow`: enqueues the first `WM_PAINT`. Returns the previous visibility (0).
 #[unsafe(no_mangle)]
-pub extern "system" fn ShowWindow(_hwnd: HWND, _cmd_show: i32) -> BOOL {
-    post(WM_PAINT, 0, 0);
+pub extern "system" fn ShowWindow(hwnd: HWND, _cmd_show: i32) -> BOOL {
+    post(hwnd, WM_PAINT, 0, 0);
     0
 }
 
 /// `UpdateWindow`: enqueues a `WM_PAINT` if the window needs repainting.
 #[unsafe(no_mangle)]
-pub extern "system" fn UpdateWindow(_hwnd: HWND) -> BOOL {
-    post(WM_PAINT, 0, 0);
+pub extern "system" fn UpdateWindow(hwnd: HWND) -> BOOL {
+    post(hwnd, WM_PAINT, 0, 0);
     1
 }
 
@@ -401,7 +564,7 @@ pub extern "system" fn GetMessageA(
         core::ptr::write(
             msg,
             MSG {
-                hwnd: THE_HWND,
+                hwnd: m.hwnd,
                 message: m.message,
                 wParam: m.wparam,
                 lParam: m.lparam,
@@ -419,6 +582,7 @@ fn next_message() -> Queued {
     let s = state();
     if s.quit {
         return Queued {
+            hwnd: 0,
             message: WM_QUIT,
             wparam: s.quit_code,
             lparam: 0,
@@ -428,6 +592,7 @@ fn next_message() -> Queued {
         let c = s.pending_char;
         s.pending_char = 0;
         return Queued {
+            hwnd: input_target(),
             message: WM_CHAR,
             wparam: c as usize,
             lparam: 0,
@@ -441,6 +606,7 @@ fn next_message() -> Queued {
         if unsafe { NtUserGetInputEvent(ev.as_mut_ptr()) } < 0 {
             // Cannot wait for input: end the loop rather than spin.
             return Queued {
+                hwnd: 0,
                 message: WM_QUIT,
                 wparam: 0,
                 lparam: 0,
@@ -469,6 +635,7 @@ fn next_message() -> Queued {
                 mk |= MK_MBUTTON;
             }
             return Queued {
+                hwnd: input_target(),
                 message,
                 wparam: mk,
                 lparam: ((((ev[2] & 0xFFFF) << 16) | (ev[1] & 0xFFFF)) as i32) as isize,
@@ -481,6 +648,7 @@ fn next_message() -> Queued {
         s.last_vk = ev[1];
         s.last_ch = ev[2];
         return Queued {
+            hwnd: input_target(),
             message: WM_KEYDOWN,
             wparam: ev[1] as usize,
             lparam: 0,
@@ -514,7 +682,10 @@ pub extern "system" fn DispatchMessageA(msg: *const MSG) -> LRESULT {
         return 0;
     }
     let m = unsafe { &*msg };
-    let proc = get_wndproc();
+    let mut proc = wndproc_of(m.hwnd);
+    if proc == 0 {
+        proc = state().last_wndproc;
+    }
     if proc == 0 {
         return 0;
     }
@@ -546,18 +717,19 @@ pub extern "system" fn PostQuitMessage(exit_code: i32) {
 
 // --- painting ----------------------------------------------------------------------
 
-/// `BeginPaint`: returns the opaque screen HDC and fills the PAINTSTRUCT (rcPaint =
-/// whole client area via `NtGdiGetFbInfo`).
+/// `BeginPaint`: returns the window's HDC (carries the window id) and fills the
+/// PAINTSTRUCT (rcPaint = the window's client area via `NtGdiGetFbInfo`).
 #[unsafe(no_mangle)]
 #[allow(clippy::not_unsafe_ptr_arg_deref)]
-pub extern "system" fn BeginPaint(_hwnd: HWND, paint: *mut PAINTSTRUCT) -> HDC {
-    let (w, h) = screen_size();
+pub extern "system" fn BeginPaint(hwnd: HWND, paint: *mut PAINTSTRUCT) -> HDC {
+    let dc = dc_for(hwnd);
+    let (w, h) = client_size(window_id_of_dc(dc));
     if !paint.is_null() {
         unsafe {
             core::ptr::write(
                 paint,
                 PAINTSTRUCT {
-                    hdc: SCREEN_HDC,
+                    hdc: dc,
                     fErase: 1,
                     rcPaint: RECT {
                         left: 0,
@@ -572,13 +744,13 @@ pub extern "system" fn BeginPaint(_hwnd: HWND, paint: *mut PAINTSTRUCT) -> HDC {
             );
         }
     }
-    SCREEN_HDC
+    dc
 }
 
-/// `GetDC`: the opaque screen DC (single window, client area = screen).
+/// `GetDC`: the window's HDC (hwnd 0 = the implicit full-screen window).
 #[unsafe(no_mangle)]
-pub extern "system" fn GetDC(_hwnd: HWND) -> HDC {
-    SCREEN_HDC
+pub extern "system" fn GetDC(hwnd: HWND) -> HDC {
+    dc_for(hwnd)
 }
 
 /// `ReleaseDC`: nothing to release.
@@ -587,10 +759,11 @@ pub extern "system" fn ReleaseDC(_hwnd: HWND, _hdc: HDC) -> i32 {
     1
 }
 
-/// `EndPaint`: nothing to release (the screen DC is implicit).
+/// `EndPaint`: composites the window onto the screen (`NtUserFlushWindow`).
 #[unsafe(no_mangle)]
 #[allow(clippy::not_unsafe_ptr_arg_deref)]
-pub extern "system" fn EndPaint(_hwnd: HWND, _paint: *const PAINTSTRUCT) -> BOOL {
+pub extern "system" fn EndPaint(hwnd: HWND, _paint: *const PAINTSTRUCT) -> BOOL {
+    unsafe { NtUserFlushWindow((hwnd & 0x00FF_FFFF) as u32) };
     1
 }
 
@@ -598,7 +771,7 @@ pub extern "system" fn EndPaint(_hwnd: HWND, _paint: *const PAINTSTRUCT) -> BOOL
 /// nonzero on success. A brush this process did not create via gdi32 paints black.
 #[unsafe(no_mangle)]
 #[allow(clippy::not_unsafe_ptr_arg_deref)]
-pub extern "system" fn FillRect(_hdc: HDC, lprc: *const RECT, hbr: HBRUSH) -> i32 {
+pub extern "system" fn FillRect(hdc: HDC, lprc: *const RECT, hbr: HBRUSH) -> i32 {
     if lprc.is_null() {
         return 0;
     }
@@ -611,8 +784,8 @@ pub extern "system" fn FillRect(_hdc: HDC, lprc: *const RECT, hbr: HBRUSH) -> i3
     let w = (r.right - left) as u32;
     let h = (r.bottom - top) as u32;
     let rgb = colorref_to_rgb(brush_colorref(hbr).unwrap_or(0));
-    // Window id 0: the process's implicit full-screen compat window (Task 1).
-    unsafe { NtGdiFillRect(0, left as u32, top as u32, w, h, rgb) };
+    let id = window_id_of_dc(hdc);
+    unsafe { NtGdiFillRect(id, left as u32, top as u32, w, h, rgb) };
     1
 }
 

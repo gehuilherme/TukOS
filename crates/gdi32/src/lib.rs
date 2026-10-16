@@ -69,6 +69,17 @@ unsafe extern "system" {
 }
 
 pub type HDC = isize;
+
+// HDC encoding shared with user32 (DC_TAG | window id); kept in sync with
+// crates/user32/src/lib.rs. Anything else (id 0) = the implicit full-screen window.
+const DC_TAG: isize = 0x4400_0000;
+fn window_id_of_dc(hdc: HDC) -> u32 {
+    if hdc & !0x00FF_FFFF == DC_TAG {
+        (hdc & 0x00FF_FFFF) as u32
+    } else {
+        0
+    }
+}
 pub type HGDIOBJ = isize;
 pub type HBRUSH = isize;
 pub type COLORREF = u32;
@@ -160,7 +171,7 @@ pub extern "system" fn SetBkColor(_hdc: HDC, color: COLORREF) -> COLORREF {
 
 #[unsafe(no_mangle)]
 #[allow(clippy::not_unsafe_ptr_arg_deref)] // Win32 ABI: raw pointer, validated by the kernel
-pub extern "system" fn TextOutA(_hdc: HDC, x: i32, y: i32, text: *const u8, count: i32) -> BOOL {
+pub extern "system" fn TextOutA(hdc: HDC, x: i32, y: i32, text: *const u8, count: i32) -> BOOL {
     if text.is_null() || count <= 0 || x < 0 || y < 0 {
         return (count == 0 && !text.is_null()) as BOOL;
     }
@@ -171,7 +182,16 @@ pub extern "system" fn TextOutA(_hdc: HDC, x: i32, y: i32, text: *const u8, coun
     } else {
         colorref_to_rgb(BK_COLOR.load(Ordering::Relaxed))
     };
-    // Window id 0: the process's implicit full-screen compat window (Task 1).
-    let st = unsafe { NtGdiTextOut(0, x as u32, y as u32, text, count as u32, fg, bg) };
+    let st = unsafe {
+        NtGdiTextOut(
+            window_id_of_dc(hdc),
+            x as u32,
+            y as u32,
+            text,
+            count as u32,
+            fg,
+            bg,
+        )
+    };
     (st >= 0) as BOOL
 }

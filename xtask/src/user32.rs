@@ -59,6 +59,7 @@ mod tests {
             "LoadCursorA",
             "BeginPaint",
             "EndPaint",
+            "DestroyWindow",
             "FillRect",
         ] {
             assert!(exports.iter().any(|n| n == want), "exports: {exports:?}");
