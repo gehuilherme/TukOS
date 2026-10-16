@@ -221,8 +221,9 @@ pub extern "system" fn NtUserGetKeyEvent() {
     core::arch::naked_asm!("mov r10, rcx", "mov eax, 17", "syscall", "ret");
 }
 
-// NT_USER_GET_INPUT_EVENT = 18: blocking unified input event (5 x u32: tag, a, b, c, d;
-// tag 0 = key {vk, ch, down}, tag 1 = mouse {x, y, buttons, kind}).
+// NT_USER_GET_INPUT_EVENT = 18: blocking ROUTED input event (6 x u32: tag, a, b, c, d,
+// hwnd; tag 0 = key {vk, ch, down}, tag 1 = mouse {x, y (client), buttons, kind}; hwnd =
+// target window, mouse -> window under cursor, key -> focused window).
 #[unsafe(naked)]
 #[unsafe(no_mangle)]
 pub extern "system" fn NtUserGetInputEvent() {

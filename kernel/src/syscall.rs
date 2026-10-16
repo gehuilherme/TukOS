@@ -41,14 +41,15 @@ pub const NT_GDI_TEXT_OUT: u64 = 16;
 /// `(out_key_event_ptr)`: BLOCKS until a key event; writes `KeyEventAbi { vk, ch, flags }`
 /// (3 x u32, flags bit0 = down).
 pub const NT_USER_GET_KEY_EVENT: u64 = 17;
-/// `(out_input_event_ptr)`: BLOCKS until ANY input event (key or mouse); writes
-/// `InputEventAbi` = 5 x u32 `{ tag, a, b, c, d }`.
+/// `(out_input_event_ptr)`: BLOCKS until a ROUTED input event destined for one of the
+/// caller's windows; writes `InputEventAbi` = 6 x u32 `{ tag, a, b, c, d, hwnd }`.
 /// tag 0 = key:   a = vk, b = ch, c = down (0/1), d = 0.
-/// tag 1 = mouse: a = x, b = y (i32 as u32, already clamped to the framebuffer),
+/// tag 1 = mouse: a = x, b = y, in the target window's CLIENT space (i32 as u32),
 ///                c = buttons (bit0 left, bit1 right, bit2 middle),
 ///                d = kind: 0 = move, 1 = left down, 2 = left up, 3 = right down,
 ///                4 = right up, 5 = middle down, 6 = middle up.
-/// (Nr 17 keeps returning only KEY events; mouse events ahead of a key are skipped.)
+/// hwnd = the target window id (mouse -> window under the cursor; key -> focused window;
+/// a button-down raises+focuses the hit window). Nr 17 keeps returning only KEY events.
 pub const NT_USER_GET_INPUT_EVENT: u64 = 18;
 /// `(x, y, w, h, style, out_hwnd_ptr)`; style and out_hwnd on the user stack. Creates a
 /// window owned by the caller (size >= screen or style bit0 -> full-screen compat) and
@@ -649,20 +650,42 @@ fn nt_user_get_key_event(out: u64) -> u64 {
     }
 }
 
-/// NtUserGetInputEvent: blocking pop of the unified input queue (key or mouse).
+/// NtUserGetInputEvent: blocking, ROUTED pop of the unified input queue (key or mouse).
+/// The kernel decides the TARGET window per event (mouse -> topmost window under the
+/// cursor; key -> the focused window; a mouse button-down raises+focuses the hit window)
+/// and delivers to the calling process ONLY the events destined for its own windows, so
+/// one process never sees another's input. Mouse coordinates are returned in the target
+/// window's CLIENT space, and the target hwnd is written in word 5 (24-byte ABI).
+///
+/// Blocking: the caller first drains its own mailbox, else routes raw events from the
+/// shared queue (recompositing on a button-down), else polls the i8042 and yields. No lock
+/// is held across the yield, and the WM->FBCON order is preserved (route then composite).
 fn nt_user_get_input_event(out: u64) -> u64 {
     use kbd::{InputEvent, MouseButton, MouseKind};
-    if !crate::usercopy::copy_to_user(out, &[0u8; 20]) {
+    if !crate::usercopy::copy_to_user(out, &[0u8; 24]) {
         return STATUS_ACCESS_VIOLATION;
     }
-    let ev = loop {
-        if let Some(e) = crate::kbd::try_pop_input_event() {
-            break e;
+    let owner = crate::sched::current_id();
+    let routed = loop {
+        // 1. An event already routed to one of MY windows.
+        if let Some(r) = crate::wm::take_input_for(owner) {
+            break r;
         }
+        // 2. Route the next raw event to its target's mailbox (may be another process's).
+        if let Some(raw) = crate::kbd::try_pop_input_event() {
+            if let Some((r, recompose)) = crate::wm::route_input(raw) {
+                if recompose {
+                    crate::wm::composite();
+                }
+                crate::wm::deliver(r);
+            }
+            continue;
+        }
+        // 3. Nothing ready: pump the i8042 and yield (no lock held).
         crate::kbd::poll();
         crate::sched::yield_now();
     };
-    let words: [u32; 5] = match ev {
+    let words: [u32; 5] = match routed.ev {
         InputEvent::Key { vk, ch, down } => [0, vk as u32, ch, down as u32, 0],
         InputEvent::Mouse {
             x,
@@ -682,10 +705,11 @@ fn nt_user_get_input_event(out: u64) -> u64 {
             [1, x as u32, y as u32, buttons as u32, k]
         }
     };
-    let mut buf = [0u8; 20];
+    let mut buf = [0u8; 24];
     for (i, w) in words.iter().enumerate() {
         buf[i * 4..i * 4 + 4].copy_from_slice(&w.to_le_bytes());
     }
+    buf[20..24].copy_from_slice(&routed.hwnd.to_le_bytes());
     if crate::usercopy::copy_to_user(out, &buf) {
         STATUS_SUCCESS
     } else {

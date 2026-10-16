@@ -141,6 +141,7 @@ const TESTS: &[(&str, TestFn)] = &[
     ("wm_compose_one", wm_compose_one),
     ("wm_compose_fullscreen", wm_compose_fullscreen),
     ("wm_extreme_coords_no_panic", wm_extreme_coords_no_panic),
+    ("wm_two_windows_focus", wm_two_windows_focus),
     ("window_positioned_paints", window_positioned_paints),
     ("window_paints", window_paints),
     ("gui_hello_window", gui_hello_window),
@@ -2033,6 +2034,130 @@ fn wm_extreme_coords_no_panic() -> Result<(), &'static str> {
     if !ok {
         return Err("wm_extreme_coords: framebuffer corrompido por janela off-screen");
     }
+    Ok(())
+}
+
+/// Owners for the two-window routing test (large constants so they never collide with a
+/// real scheduler slot index).
+const WM_OWNER_A: usize = 0x7710;
+const WM_OWNER_B: usize = 0x7711;
+
+/// Task 3 routing: two overlapping windows A (lower z) and B (upper z). Composition shows
+/// B on top where they overlap, A where it is alone, desktop bg outside both. Then a mouse
+/// move + left-button-down over A's exposed area must target A with client coords AND raise
+/// A above B (the overlap now shows A); a key must route to the now-focused window (A); and
+/// a mouse move over B must target B with the right client coords.
+fn wm_two_windows_focus() -> Result<(), &'static str> {
+    use kbd::{InputEvent, MouseButton, MouseKind};
+    const CA: u32 = 0x0012_3456;
+    const CB: u32 = 0x0065_4321;
+    const DESKTOP_BG: u32 = 0x0020_3040;
+    if let Some(con) = crate::fbcon::FBCON.lock().as_mut() {
+        con.clear();
+    }
+    // A covers screen (100..300, 100..300); B covers (200..400, 200..400). B created after
+    // A, so B.z > A.z (on top). Overlap = (200..300, 200..300).
+    let a = crate::wm::create_window(WM_OWNER_A, 100, 100, 200, 200, 0)
+        .ok_or("wm_two_windows_focus: create A falhou")?;
+    let b = crate::wm::create_window(WM_OWNER_B, 200, 200, 200, 200, 0)
+        .ok_or("wm_two_windows_focus: create B falhou")?;
+    crate::wm::fill_rect_in(WM_OWNER_A, a, 0, 0, 200, 200, CA);
+    crate::wm::fill_rect_in(WM_OWNER_B, b, 0, 0, 200, 200, CB);
+    crate::wm::composite();
+    let cleanup = || {
+        crate::wm::destroy_window(a);
+        crate::wm::destroy_window(b);
+        if let Some(con) = crate::fbcon::FBCON.lock().as_mut() {
+            con.clear();
+        }
+    };
+    macro_rules! bail {
+        ($msg:expr) => {{
+            cleanup();
+            return Err($msg);
+        }};
+    }
+    // Initial stacking: A alone (150,150) -> CA; overlap (250,250) -> CB (B on top);
+    // B alone (350,350) -> CB; outside both (50,50) -> desktop bg.
+    if crate::fbcon::pixel(150, 150) != Some(CA) {
+        bail!("wm_two_windows_focus: area exclusiva de A nao mostra CA");
+    }
+    if crate::fbcon::pixel(250, 250) != Some(CB) {
+        bail!("wm_two_windows_focus: sobreposicao deveria mostrar B no topo");
+    }
+    if crate::fbcon::pixel(350, 350) != Some(CB) {
+        bail!("wm_two_windows_focus: area exclusiva de B nao mostra CB");
+    }
+    if crate::fbcon::pixel(50, 50) != Some(DESKTOP_BG) {
+        bail!("wm_two_windows_focus: fundo da area de trabalho ausente fora das janelas");
+    }
+    // Mouse MOVE over A's exposed area (150,150): targets A with client coords (50,50).
+    let mov = InputEvent::Mouse {
+        x: 150,
+        y: 150,
+        buttons: 0,
+        kind: MouseKind::Move,
+    };
+    match crate::wm::route_input(mov) {
+        Some((r, recompose)) => {
+            if r.hwnd != a || r.owner != WM_OWNER_A {
+                bail!("wm_two_windows_focus: move sobre A nao roteou para A");
+            }
+            if recompose {
+                bail!("wm_two_windows_focus: um move nao deve recompor");
+            }
+            match r.ev {
+                InputEvent::Mouse { x: 50, y: 50, .. } => {}
+                _ => bail!("wm_two_windows_focus: coords de cliente de A erradas"),
+            }
+        }
+        None => bail!("wm_two_windows_focus: move sobre A nao teve alvo"),
+    }
+    // Mouse LEFT-DOWN over A's exposed area: targets A, raises+focuses A, asks to recompose.
+    let down = InputEvent::Mouse {
+        x: 150,
+        y: 150,
+        buttons: 1,
+        kind: MouseKind::Down(MouseButton::Left),
+    };
+    match crate::wm::route_input(down) {
+        Some((r, recompose)) => {
+            if r.hwnd != a || !recompose {
+                bail!("wm_two_windows_focus: clique em A nao levantou/focou A");
+            }
+        }
+        None => bail!("wm_two_windows_focus: clique sobre A nao teve alvo"),
+    }
+    crate::wm::composite();
+    // A is now on top: the overlap (250,250) shows CA.
+    if crate::fbcon::pixel(250, 250) != Some(CA) {
+        bail!("wm_two_windows_focus: A nao subiu para o topo apos o clique");
+    }
+    // A key now routes to the focused window, which is A.
+    let key = InputEvent::Key {
+        vk: 0x41,
+        ch: b'a' as u32,
+        down: true,
+    };
+    match crate::wm::route_input(key) {
+        Some((r, _)) if r.hwnd == a && r.owner == WM_OWNER_A => {}
+        _ => bail!("wm_two_windows_focus: tecla nao foi para a janela focada (A)"),
+    }
+    // Mouse MOVE over B's exposed area (350,350): targets B, client coords (150,150).
+    let mov_b = InputEvent::Mouse {
+        x: 350,
+        y: 350,
+        buttons: 0,
+        kind: MouseKind::Move,
+    };
+    match crate::wm::route_input(mov_b) {
+        Some((r, _)) if r.hwnd == b && r.owner == WM_OWNER_B => match r.ev {
+            InputEvent::Mouse { x: 150, y: 150, .. } => {}
+            _ => bail!("wm_two_windows_focus: coords de cliente de B erradas"),
+        },
+        _ => bail!("wm_two_windows_focus: move sobre B nao roteou para B"),
+    }
+    cleanup();
     Ok(())
 }
 

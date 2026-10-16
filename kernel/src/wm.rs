@@ -12,6 +12,7 @@ extern crate alloc;
 
 use alloc::vec::Vec;
 use arch_x86_64::interrupts::IrqMutex;
+use kbd::{InputEvent, MouseKind};
 use noto_sans_mono_bitmap::{FontWeight, RasterHeight, get_raster, get_raster_width};
 
 const WEIGHT: FontWeight = FontWeight::Regular;
@@ -260,6 +261,109 @@ pub fn raise_and_focus(id: u32) {
             w.focused = j == i;
         }
     }
+}
+
+/// A routed input event: the window it targets, that window's owner thread, and the
+/// event itself with any mouse coordinates already converted to the window's CLIENT
+/// space (screen - window origin). Produced by `route_input`.
+#[derive(Clone, Copy)]
+pub struct RoutedInput {
+    pub owner: usize,
+    pub hwnd: u32,
+    pub ev: InputEvent,
+}
+
+/// Routes one raw input event to its target window (Task 3). A mouse event targets the
+/// topmost visible window under the cursor (`hit_test`); a mouse BUTTON-DOWN additionally
+/// raises+focuses that window (and the returned bool asks the caller to recomposite). A
+/// key event targets the currently focused window. Mouse coordinates are converted to the
+/// target window's client space. Returns `None` when there is no target (no window under
+/// the cursor / no focused window), in which case the event is dropped.
+///
+/// Lock discipline: takes and releases the WM lock for the lookup, then (button-down only)
+/// calls `raise_and_focus` which takes its own WM lock. No FBCON lock is taken here and no
+/// lock is held across the call, so the WM->FBCON order (the caller composites afterwards)
+/// is preserved.
+pub fn route_input(ev: InputEvent) -> Option<(RoutedInput, bool)> {
+    match ev {
+        InputEvent::Key { .. } => {
+            // Keyboard goes to the focused window (if any).
+            let (owner, hwnd) = {
+                let st = WM.lock();
+                let w = st.windows.iter().find(|w| w.focused && w.visible)?;
+                (w.owner_tid, w.id)
+            };
+            Some((RoutedInput { owner, hwnd, ev }, false))
+        }
+        InputEvent::Mouse {
+            x,
+            y,
+            buttons,
+            kind,
+        } => {
+            // Mouse goes to the topmost visible window under the cursor (same z as the
+            // compositor). Resolve it and its origin while holding the lock, then release.
+            let (id, owner, wx, wy) = {
+                let st = WM.lock();
+                let w = st
+                    .windows
+                    .iter()
+                    .filter(|w| {
+                        w.visible
+                            && x >= w.x
+                            && y >= w.y
+                            && x < w.x + w.w as i32
+                            && y < w.y + w.h as i32
+                    })
+                    .max_by_key(|w| w.z)?;
+                (w.id, w.owner_tid, w.x, w.y)
+            };
+            // A button-down raises+focuses the hit window (lock taken inside) and asks the
+            // caller to recomposite so the new z-order reaches the screen.
+            let recompose = matches!(kind, MouseKind::Down(_));
+            if recompose {
+                raise_and_focus(id);
+            }
+            // Convert to client coordinates (screen - window origin).
+            let ev = InputEvent::Mouse {
+                x: x - wx,
+                y: y - wy,
+                buttons,
+                kind,
+            };
+            Some((
+                RoutedInput {
+                    owner,
+                    hwnd: id,
+                    ev,
+                },
+                recompose,
+            ))
+        }
+    }
+}
+
+/// Per-owner mailbox of routed input events. The unified raw queue (`kbd`) is a single
+/// FIFO; `NtUserGetInputEvent` drains it, routes each event here, and then each caller
+/// pops only the events destined for ITS windows, so one process never consumes another
+/// process's input. Bounded; drops the oldest when full (like the raw queue).
+static ROUTED: IrqMutex<Vec<RoutedInput>> = IrqMutex::new(Vec::new());
+const ROUTED_CAP: usize = 128;
+
+/// Enqueues a routed event into the per-owner mailbox (drops the oldest when full).
+pub fn deliver(r: RoutedInput) {
+    let mut q = ROUTED.lock();
+    if q.len() >= ROUTED_CAP {
+        q.remove(0);
+    }
+    q.push(r);
+}
+
+/// Pops the oldest routed event destined for `owner`, leaving other owners' events queued.
+pub fn take_input_for(owner: usize) -> Option<RoutedInput> {
+    let mut q = ROUTED.lock();
+    let i = q.iter().position(|r| r.owner == owner)?;
+    Some(q.remove(i))
 }
 
 /// Composites the whole screen: desktop background, every visible window by ascending

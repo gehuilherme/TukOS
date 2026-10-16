@@ -86,10 +86,12 @@ unsafe extern "system" {
     // NtGdiFillRect(window_id, x, y, w, h, color): paints a 0x00RRGGBB rectangle into the
     // window's backbuffer (window_id 0 = implicit full-screen compat window) (syscall 15).
     fn NtGdiFillRect(window_id: u32, x: u32, y: u32, w: u32, h: u32, color: u32) -> i32;
-    // NtUserGetInputEvent(out): BLOCKS in the kernel until an input event, then writes
-    // 5 x u32 (syscall 18): key   = [0, vk, ch, down, 0];
-    //                       mouse = [1, x, y, buttons (bit0 L, bit1 R, bit2 M), kind]
-    // with kind 0 Move, 1/2 left down/up, 3/4 right down/up, 5/6 middle down/up.
+    // NtUserGetInputEvent(out): BLOCKS in the kernel until a ROUTED input event for one of
+    // this process's windows, then writes 6 x u32 (syscall 18):
+    //   key   = [0, vk, ch, down, 0, hwnd];
+    //   mouse = [1, x, y (CLIENT coords), buttons (bit0 L, bit1 R, bit2 M), kind, hwnd]
+    // with kind 0 Move, 1/2 left down/up, 3/4 right down/up, 5/6 middle down/up. word 5 is
+    // the target window id (mouse -> window under cursor; key -> focused window).
     fn NtUserGetInputEvent(out: *mut u32) -> i32;
     // NtUserCreateWindow(x, y, w, h, style, out_hwnd) (syscall 19): style bit0 = compat
     // full-screen; writes the window id (u64) to out_hwnd.
@@ -269,6 +271,8 @@ struct State {
     /// Virtual key and character of the last `WM_KEYDOWN` handed out.
     last_vk: u32,
     last_ch: u32,
+    /// Target window of the last `WM_KEYDOWN` (so its `WM_CHAR` goes to the same window).
+    last_key_hwnd: HWND,
 }
 
 static mut STATE: State = State {
@@ -290,6 +294,7 @@ static mut STATE: State = State {
     pending_char: 0,
     last_vk: 0,
     last_ch: 0,
+    last_key_hwnd: 0,
 };
 
 fn state() -> &'static mut State {
@@ -381,7 +386,10 @@ fn wndproc_of(hwnd: HWND) -> usize {
     0
 }
 
-/// The window input is routed to: the most recently created live one (Task 3 adds focus).
+/// Fallback input target (the most recently created live window), used only if the kernel
+/// delivers an event with no target hwnd. Normally the kernel routes each event to a
+/// specific window (mouse -> window under the cursor; key -> focused window) and reports
+/// that hwnd, so `next_message` uses the kernel's target directly.
 fn input_target() -> HWND {
     let s = state();
     let mut best = 0;
@@ -591,8 +599,13 @@ fn next_message() -> Queued {
     if s.pending_char != 0 {
         let c = s.pending_char;
         s.pending_char = 0;
+        let hwnd = if s.last_key_hwnd != 0 {
+            s.last_key_hwnd
+        } else {
+            input_target()
+        };
         return Queued {
-            hwnd: input_target(),
+            hwnd,
             message: WM_CHAR,
             wparam: c as usize,
             lparam: 0,
@@ -602,7 +615,7 @@ fn next_message() -> Queued {
         return p;
     }
     loop {
-        let mut ev = [0u32; 5];
+        let mut ev = [0u32; 6];
         if unsafe { NtUserGetInputEvent(ev.as_mut_ptr()) } < 0 {
             // Cannot wait for input: end the loop rather than spin.
             return Queued {
@@ -612,6 +625,13 @@ fn next_message() -> Queued {
                 lparam: 0,
             };
         }
+        // The kernel tags each event with its target window; fall back to the newest
+        // window only if it somehow reported none.
+        let target = if ev[5] != 0 {
+            ev[5] as HWND
+        } else {
+            input_target()
+        };
         if ev[0] == 1 {
             let message = match ev[4] {
                 0 => WM_MOUSEMOVE,
@@ -635,7 +655,7 @@ fn next_message() -> Queued {
                 mk |= MK_MBUTTON;
             }
             return Queued {
-                hwnd: input_target(),
+                hwnd: target,
                 message,
                 wparam: mk,
                 lparam: ((((ev[2] & 0xFFFF) << 16) | (ev[1] & 0xFFFF)) as i32) as isize,
@@ -647,8 +667,9 @@ fn next_message() -> Queued {
         let s = state();
         s.last_vk = ev[1];
         s.last_ch = ev[2];
+        s.last_key_hwnd = target;
         return Queued {
-            hwnd: input_target(),
+            hwnd: target,
             message: WM_KEYDOWN,
             wparam: ev[1] as usize,
             lparam: 0,
