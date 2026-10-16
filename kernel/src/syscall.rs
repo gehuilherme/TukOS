@@ -601,9 +601,12 @@ fn nt_free_virtual_memory(process: u64, base_ptr: u64, size_ptr: u64, free_type:
 }
 
 fn nt_gdi_get_fb_info(window_id: u64, out: u64) -> u64 {
-    // A real window id reports its client size; 0/unknown reports the screen size.
+    // A real window id OWNED BY THE CALLER reports its client size; 0, unknown, or a
+    // window belonging to another process reports the screen size (the owner check stops
+    // a process from probing a foreign window's dimensions).
+    let owner = crate::sched::current_id();
     let dims = if window_id != 0 {
-        crate::wm::window_client_size(window_id as u32)
+        crate::wm::window_client_size(owner, window_id as u32)
     } else {
         None
     };

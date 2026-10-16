@@ -21,6 +21,17 @@ const HEIGHT: RasterHeight = RasterHeight::Size16;
 /// At most this many live windows; `create_window` past it fails cleanly.
 pub const MAX_WINDOWS: usize = 32;
 
+/// Total kernel-heap budget for ALL live windows' backbuffers, in bytes. `MAX_WINDOWS`
+/// alone is NOT a memory bound: a single process can create a few near-screen windows
+/// (each clamped up to ~screen = several MiB) and, with an infallible allocation and no
+/// `#[alloc_error_handler]`, exhaust the 8 MiB kernel heap (`heap::HEAP_PAGES` = 2048)
+/// and abort the whole kernel. We cap the SUM of live backbuffer bytes at 6 MiB, leaving
+/// ~2 MiB of the heap for the rest of the kernel; a `create_window` that would exceed it
+/// is refused cleanly (returns `None`), and the budget is released on destroy. The
+/// allocation itself is also fallible (`try_reserve_exact`), so even within budget an OOM
+/// fails cleanly instead of aborting.
+const MAX_TOTAL_BACKBUFFER_BYTES: usize = 6 * 1024 * 1024;
+
 /// Desktop background painted behind every window (clean-room colour).
 const DESKTOP_BG: u32 = 0x0020_3040;
 /// 1px frame drawn around non-full-screen windows (clean-room aesthetic).
@@ -51,12 +62,16 @@ struct WmState {
     windows: Vec<Window>,
     next_id: u32,
     next_z: u32,
+    /// Running sum of every live window's backbuffer size in bytes, kept in step with
+    /// `windows` on create/destroy. Guards `MAX_TOTAL_BACKBUFFER_BYTES`.
+    total_backbuffer_bytes: usize,
 }
 
 static WM: IrqMutex<WmState> = IrqMutex::new(WmState {
     windows: Vec::new(),
     next_id: 1, // id 0 is reserved ("no window" / the implicit default)
     next_z: 1,
+    total_backbuffer_bytes: 0,
 });
 
 /// Clamps a requested window size to the screen (never larger than the framebuffer).
@@ -116,10 +131,27 @@ pub fn create_window(owner: usize, x: i32, y: i32, w: u32, h: u32, style: u32) -
         (x, y, cw, ch, false)
     };
     let len = (w as usize).checked_mul(h as usize)?;
+    // Total-memory budget (read-only check): refuse before touching the heap if this
+    // window would push the live backbuffer total over the budget. No state is mutated
+    // yet, so there is nothing to roll back on this early return.
+    let bytes = len.checked_mul(core::mem::size_of::<u32>())?;
+    if st.total_backbuffer_bytes.checked_add(bytes)? > MAX_TOTAL_BACKBUFFER_BYTES {
+        return None;
+    }
+    // Fallible allocation: reserve the exact capacity first (no `#[alloc_error_handler]`
+    // exists, so an infallible `vec![0; len]` would abort the kernel on OOM). Only after
+    // the reservation succeeds do we fill and commit the budget, so a failure leaks
+    // neither memory nor budget.
+    let mut backbuffer: Vec<u32> = Vec::new();
+    if backbuffer.try_reserve_exact(len).is_err() {
+        return None;
+    }
+    backbuffer.resize(len, 0); // within the reserved capacity: never reallocates
     let id = st.next_id;
     let z = st.next_z;
     st.next_id = st.next_id.wrapping_add(1).max(1);
     st.next_z = st.next_z.wrapping_add(1);
+    st.total_backbuffer_bytes += bytes;
     st.windows.push(Window {
         id,
         owner_tid: owner,
@@ -131,7 +163,7 @@ pub fn create_window(owner: usize, x: i32, y: i32, w: u32, h: u32, style: u32) -
         focused: true,
         visible: true,
         fullscreen,
-        backbuffer: alloc::vec![0u32; len],
+        backbuffer,
     });
     // The newest window becomes the SOLE focused one (matches Windows), so keystrokes go
     // to it even before any click. Without this, two creates leave two focused windows and
@@ -141,19 +173,52 @@ pub fn create_window(owner: usize, x: i32, y: i32, w: u32, h: u32, style: u32) -
     Some(id)
 }
 
-/// Destroys the window `id` (frees its backbuffer). No-op if it does not exist.
+/// Destroys the window `id` (frees its backbuffer and releases its budget). No-op if it
+/// does not exist.
 pub fn destroy_window(id: u32) {
     let mut st = WM.lock();
     if let Some(i) = st.find(id) {
+        let bytes = st.windows[i].backbuffer.len() * core::mem::size_of::<u32>();
         st.windows.remove(i);
+        st.total_backbuffer_bytes = st.total_backbuffer_bytes.saturating_sub(bytes);
     }
 }
 
-/// Destroys every window owned by thread `owner` (called when the thread exits so its
-/// backbuffers are freed). No framebuffer touch.
+/// Destroys every window owned by thread `owner` (called from `exit_current_with` when the
+/// thread exits so its backbuffers and budget are freed), then keeps the WM invariants:
+///   - M2: purges the dead owner's stale `ROUTED` input so a REUSED scheduler slot id can
+///     never inherit its predecessor's queued events.
+///   - M1: if any window survives, re-focuses the topmost (highest z) so the "exactly one
+///     focused window" invariant holds (otherwise `route_input(Key)` would drop every key
+///     until a click) and recomposites so the dead owner's windows leave the screen.
+///
+/// When NO window survives we deliberately do NOT recomposite: a single GUI process's final
+/// frame is left on screen after it exits (the long-standing behaviour `window_positioned_
+/// paints` asserts). Lock order: the WM mutex is released before `purge_routed_for`
+/// (ROUTED standalone) and before `composite` (WM->FBCON); no lock is held across either.
 pub fn destroy_windows_of(owner: usize) {
-    let mut st = WM.lock();
-    st.windows.retain(|w| w.owner_tid != owner);
+    let recompose = {
+        let mut st = WM.lock();
+        let freed: usize = st
+            .windows
+            .iter()
+            .filter(|w| w.owner_tid == owner)
+            .map(|w| w.backbuffer.len() * core::mem::size_of::<u32>())
+            .sum();
+        st.windows.retain(|w| w.owner_tid != owner);
+        st.total_backbuffer_bytes = st.total_backbuffer_bytes.saturating_sub(freed);
+        match st.windows.iter().enumerate().max_by_key(|(_, w)| w.z) {
+            Some((i, _)) => {
+                st.focus_only(i);
+                true
+            }
+            None => false,
+        }
+    };
+    purge_routed_for(owner);
+    if recompose {
+        composite();
+    }
 }
 
 /// The owner's implicit window (compat full-screen), created on first use. Used by the
@@ -168,19 +233,32 @@ pub fn implicit_window(owner: usize) -> Option<u32> {
     create_window(owner, 0, 0, u32::MAX, u32::MAX, STYLE_COMPAT)
 }
 
-/// Resolves a GDI window id for `owner`: a real id if it exists, else (id 0 or an
-/// unknown id) the owner's implicit full-screen window, created on demand.
+/// Resolves a GDI window id for `owner`: the id if it exists AND is owned by `owner`,
+/// else (id 0, an unknown id, or a window belonging to ANOTHER process) the owner's own
+/// implicit full-screen window, created on demand. The ownership check is the security
+/// boundary: without it a process could pass a foreign `window_id` and draw into / probe
+/// another process's backbuffer. A foreign id never resolves to that foreign window; it
+/// falls back to the caller's OWN surface, so GDI only ever touches the caller's memory.
 fn resolve_for(owner: usize, id: u32) -> Option<u32> {
-    if id != 0 && WM.lock().find(id).is_some() {
-        return Some(id);
+    if id != 0 {
+        let st = WM.lock();
+        if let Some(i) = st.find(id)
+            && st.windows[i].owner_tid == owner
+        {
+            return Some(id);
+        }
     }
     implicit_window(owner)
 }
 
-/// `(client_w, client_h)` of window `id`, or `None` if it does not exist.
-pub fn window_client_size(id: u32) -> Option<(u32, u32)> {
+/// `(client_w, client_h)` of window `id` IF it is owned by `owner`, else `None`. The
+/// ownership check mirrors `resolve_for`: a process must not learn another process's
+/// window dimensions by probing a foreign id (`NtGdiGetFbInfo` then reports screen size).
+pub fn window_client_size(owner: usize, id: u32) -> Option<(u32, u32)> {
     let st = WM.lock();
-    st.find(id).map(|i| (st.windows[i].w, st.windows[i].h))
+    st.find(id)
+        .filter(|&i| st.windows[i].owner_tid == owner)
+        .map(|i| (st.windows[i].w, st.windows[i].h))
 }
 
 /// Fills a rect (client coords) in window `id`'s backbuffer with `color`, clamped to
@@ -383,6 +461,14 @@ pub fn take_input_for(owner: usize) -> Option<RoutedInput> {
     let mut q = ROUTED.lock();
     let i = q.iter().position(|r| r.owner == owner)?;
     Some(q.remove(i))
+}
+
+/// Drops every routed event targeting `owner` (called on teardown): a dead owner's queued
+/// events must not survive to be handed to a NEW process that later reuses the same
+/// scheduler slot id. ROUTED is taken standalone here (never nested under WM), preserving
+/// the lock discipline.
+pub fn purge_routed_for(owner: usize) {
+    ROUTED.lock().retain(|r| r.owner != owner);
 }
 
 /// Composites the whole screen: desktop background, every visible window by ascending

@@ -143,6 +143,15 @@ const TESTS: &[(&str, TestFn)] = &[
     ("wm_extreme_coords_no_panic", wm_extreme_coords_no_panic),
     ("wm_two_windows_focus", wm_two_windows_focus),
     ("wm_focus_follows_create", wm_focus_follows_create),
+    (
+        "wm_backbuffer_budget_fails_clean",
+        wm_backbuffer_budget_fails_clean,
+    ),
+    ("wm_owner_isolation", wm_owner_isolation),
+    (
+        "wm_destroy_refocuses_survivor",
+        wm_destroy_refocuses_survivor,
+    ),
     ("window_positioned_paints", window_positioned_paints),
     ("gui_two_windows", gui_two_windows),
     ("window_paints", window_paints),
@@ -2299,6 +2308,144 @@ fn wm_focus_follows_create() -> Result<(), &'static str> {
         return Err("wm_focus_follows_create: deveria haver exatamente uma janela focada");
     }
     Ok(())
+}
+
+/// Owners for the budget / isolation / refocus regression tests (large constants so they
+/// never collide with a real scheduler slot index).
+const WM_OWNER_BUDGET: usize = 0x7720;
+const WM_OWNER_ISO_A: usize = 0x7730;
+const WM_OWNER_ISO_B: usize = 0x7731;
+const WM_OWNER_RF_A: usize = 0x7740;
+const WM_OWNER_RF_B: usize = 0x7741;
+
+/// C1 regression: creating near-screen (non-compat) windows must hit the backbuffer-bytes
+/// budget and `create_window` must then return `None` CLEANLY — not panic/abort the kernel
+/// on an infallible OOM. After the limit, the kernel survives and the already-created
+/// windows still compose. Each window is ~screen*4 bytes, so the 6 MiB budget is reached
+/// well before `MAX_WINDOWS`, proving the cap is a memory bound, not just a count.
+fn wm_backbuffer_budget_fails_clean() -> Result<(), &'static str> {
+    const GREEN: u32 = 0x0000_FF00;
+    if let Some(con) = crate::fbcon::FBCON.lock().as_mut() {
+        con.clear();
+    }
+    let (sw, sh, _) = crate::fbcon::fb_info().ok_or("budget: sem framebuffer")?;
+    let mut ids = alloc::vec::Vec::new();
+    let mut hit_limit = false;
+    // `sw-1 x sh-1` is near-screen but NOT compat (compat needs w>=sw AND h>=sh).
+    for _ in 0..(crate::wm::MAX_WINDOWS + 4) {
+        match crate::wm::create_window(WM_OWNER_BUDGET, 0, 0, sw - 1, sh - 1, 0) {
+            Some(id) => ids.push(id),
+            None => {
+                hit_limit = true;
+                break;
+            }
+        }
+    }
+    let result = (|| {
+        if !hit_limit {
+            return Err("budget: create_window nunca falhou (orcamento nao aplicado)");
+        }
+        let top = *ids
+            .last()
+            .ok_or("budget: nenhuma janela criada antes do limite")?;
+        // The survivors still compose: paint the topmost and read it back on screen.
+        crate::wm::fill_rect_in(WM_OWNER_BUDGET, top, 0, 0, 20, 20, GREEN);
+        crate::wm::composite();
+        if crate::fbcon::pixel(5, 5) != Some(GREEN) {
+            return Err("budget: janela sobrevivente nao compoe apos o limite");
+        }
+        Ok(())
+    })();
+    for id in &ids {
+        crate::wm::destroy_window(*id);
+    }
+    if let Some(con) = crate::fbcon::FBCON.lock().as_mut() {
+        con.clear();
+    }
+    result
+}
+
+/// I1 regression: a process must not draw into another process's window. Owner A targets
+/// owner B's window id with `fill_rect_in`; the ownership check must redirect that draw to
+/// A's OWN window (resolve_for fallback) and leave B's backbuffer untouched.
+fn wm_owner_isolation() -> Result<(), &'static str> {
+    const CA: u32 = 0x0011_1111;
+    const CB: u32 = 0x0022_2222;
+    const CX: u32 = 0x00AB_CDEF;
+    if let Some(con) = crate::fbcon::FBCON.lock().as_mut() {
+        con.clear();
+    }
+    // A and B are non-overlapping so each is read independently: A at (50,60), B at (300,60).
+    let a = crate::wm::create_window(WM_OWNER_ISO_A, 50, 60, 200, 200, 0)
+        .ok_or("iso: create A falhou")?;
+    let b = crate::wm::create_window(WM_OWNER_ISO_B, 300, 60, 200, 200, 0)
+        .ok_or("iso: create B falhou")?;
+    crate::wm::fill_rect_in(WM_OWNER_ISO_A, a, 0, 0, 200, 200, CA);
+    crate::wm::fill_rect_in(WM_OWNER_ISO_B, b, 0, 0, 200, 200, CB);
+    crate::wm::composite();
+    let cleanup = || {
+        crate::wm::destroy_window(a);
+        crate::wm::destroy_window(b);
+        if let Some(con) = crate::fbcon::FBCON.lock().as_mut() {
+            con.clear();
+        }
+    };
+    macro_rules! bail {
+        ($m:expr) => {{
+            cleanup();
+            return Err($m);
+        }};
+    }
+    // Owner A attempts to overwrite B's whole window with CX.
+    crate::wm::fill_rect_in(WM_OWNER_ISO_A, b, 0, 0, 200, 200, CX);
+    crate::wm::composite();
+    // B's area is unchanged (still CB): no cross-process write happened.
+    if crate::fbcon::pixel(380, 120) != Some(CB) {
+        bail!("wm_owner_isolation: A escreveu na janela de B (vazamento entre processos)");
+    }
+    // The draw was redirected to A's own window (CX shows there), proving it was handled on
+    // the caller's own surface rather than silently dropped.
+    if crate::fbcon::pixel(120, 120) != Some(CX) {
+        bail!("wm_owner_isolation: desenho de A nao foi redirecionado para a propria janela");
+    }
+    cleanup();
+    Ok(())
+}
+
+/// M1 regression: destroying the focused window's owner must re-focus a survivor (so the
+/// "exactly one focused" invariant holds and keys keep routing) instead of dropping focus
+/// to zero. Create A then B (B newest => sole focused), destroy B's owner, and assert A is
+/// the one focused window and a key routes to it.
+fn wm_destroy_refocuses_survivor() -> Result<(), &'static str> {
+    use kbd::InputEvent;
+    if let Some(con) = crate::fbcon::FBCON.lock().as_mut() {
+        con.clear();
+    }
+    let a = crate::wm::create_window(WM_OWNER_RF_A, 50, 50, 150, 150, 0)
+        .ok_or("refocus: create A falhou")?;
+    let b = crate::wm::create_window(WM_OWNER_RF_B, 250, 50, 150, 150, 0)
+        .ok_or("refocus: create B falhou")?;
+    let _ = b; // destroyed below together with its owner
+    // Destroy the focused window's owner (B). A must become the sole focused survivor.
+    crate::wm::destroy_windows_of(WM_OWNER_RF_B);
+    let focused = crate::wm::focused_count();
+    let key = InputEvent::Key {
+        vk: 0x41,
+        ch: b'a' as u32,
+        down: true,
+    };
+    let routed = crate::wm::route_input(key);
+    crate::wm::destroy_window(a);
+    if let Some(con) = crate::fbcon::FBCON.lock().as_mut() {
+        con.clear();
+    }
+    if focused != 1 {
+        return Err("wm_destroy_refocuses_survivor: deveria haver exatamente uma janela focada");
+    }
+    match routed {
+        Some((r, _)) if r.hwnd == a && r.owner == WM_OWNER_RF_A => Ok(()),
+        _ => Err("wm_destroy_refocuses_survivor: tecla nao foi para o sobrevivente (A)"),
+    }
 }
 
 fn timer_ticks_advance() -> Result<(), &'static str> {
