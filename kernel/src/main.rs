@@ -29,6 +29,7 @@ mod user32_image;
 mod user_demo;
 mod usercopy;
 mod vmem;
+mod wm;
 
 use limine::BaseRevision;
 use limine::request::{

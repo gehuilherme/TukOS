@@ -27,11 +27,16 @@ pub const NT_CREATE_PROCESS: u64 = 11;
 pub const NT_WAIT: u64 = 12;
 /// `(process_handle, out_u32_ptr)`; writes the exit code or STILL_ACTIVE (259).
 pub const NT_QUERY_EXIT_CODE: u64 = 13;
-/// `(out_fbinfo_ptr)`: writes `FbInfo { width, height, bpp }` (3 x u32).
+/// `(window_id, out_fbinfo_ptr)`: writes `FbInfo { width, height, bpp }` (3 x u32) for
+/// the window's CLIENT area; window_id 0 (or unknown) returns the screen size. (Plano 25
+/// added window_id as arg 0; it draws into that window's backbuffer, not the screen.)
 pub const NT_GDI_GET_FB_INFO: u64 = 14;
-/// `(x, y, w, h, color)`; color (0x00RRGGBB, alpha byte ignored) on the user stack.
+/// `(window_id, x, y, w, h, color)`; h and color (0x00RRGGBB) on the user stack. Draws
+/// into window_id's backbuffer (client coords, clamped); 0 = the caller's implicit
+/// full-screen compat window; then composites.
 pub const NT_GDI_FILL_RECT: u64 = 15;
-/// `(x, y, str_ptr, len, fg, bg)`; fg/bg on the user stack.
+/// `(window_id, x, y, str_ptr, len, fg, bg)`; len/fg/bg on the user stack. Draws into
+/// window_id's backbuffer (client coords, clamped); then composites.
 pub const NT_GDI_TEXT_OUT: u64 = 16;
 /// `(out_key_event_ptr)`: BLOCKS until a key event; writes `KeyEventAbi { vk, ch, flags }`
 /// (3 x u32, flags bit0 = down).
@@ -45,6 +50,14 @@ pub const NT_USER_GET_KEY_EVENT: u64 = 17;
 ///                4 = right up, 5 = middle down, 6 = middle up.
 /// (Nr 17 keeps returning only KEY events; mouse events ahead of a key are skipped.)
 pub const NT_USER_GET_INPUT_EVENT: u64 = 18;
+/// `(x, y, w, h, style, out_hwnd_ptr)`; style and out_hwnd on the user stack. Creates a
+/// window owned by the caller (size >= screen or style bit0 -> full-screen compat) and
+/// writes its id (u64) to out_hwnd; then composites.
+pub const NT_USER_CREATE_WINDOW: u64 = 19;
+/// `(hwnd)`: destroys the window (frees its backbuffer); then composites.
+pub const NT_USER_DESTROY_WINDOW: u64 = 20;
+/// `(hwnd)`: marks the window dirty and recomposes the screen.
+pub const NT_USER_FLUSH_WINDOW: u64 = 21;
 /// Max bytes accepted by NtGdiTextOut.
 const GDI_TEXT_MAX: u64 = 4096;
 #[cfg(feature = "ktest")]
@@ -586,9 +599,19 @@ fn nt_free_virtual_memory(process: u64, base_ptr: u64, size_ptr: u64, free_type:
     STATUS_SUCCESS
 }
 
-fn nt_gdi_get_fb_info(out: u64) -> u64 {
-    let Some((w, h, bpp)) = crate::fbcon::fb_info() else {
-        return STATUS_UNSUCCESSFUL;
+fn nt_gdi_get_fb_info(window_id: u64, out: u64) -> u64 {
+    // A real window id reports its client size; 0/unknown reports the screen size.
+    let dims = if window_id != 0 {
+        crate::wm::window_client_size(window_id as u32)
+    } else {
+        None
+    };
+    let (w, h, bpp) = match dims {
+        Some((w, h)) => (w, h, 32),
+        None => match crate::fbcon::fb_info() {
+            Some(d) => d,
+            None => return STATUS_UNSUCCESSFUL,
+        },
     };
     let mut buf = [0u8; 12];
     buf[0..4].copy_from_slice(&w.to_le_bytes());
@@ -670,7 +693,7 @@ fn nt_user_get_input_event(out: u64) -> u64 {
     }
 }
 
-fn nt_gdi_text_out(x: u64, y: u64, ptr: u64, len: u64, fg: u64, bg: u64) -> u64 {
+fn nt_gdi_text_out(window_id: u64, x: u64, y: u64, ptr: u64, len: u64, fg: u64, bg: u64) -> u64 {
     let len = (len as u32 as u64).min(GDI_TEXT_MAX);
     let bytes = if len == 0 {
         alloc::vec::Vec::new()
@@ -680,7 +703,34 @@ fn nt_gdi_text_out(x: u64, y: u64, ptr: u64, len: u64, fg: u64, bg: u64) -> u64 
             None => return STATUS_ACCESS_VIOLATION,
         }
     };
-    crate::fbcon::text_out(x as u32, y as u32, &bytes, fg as u32, bg as u32);
+    let owner = crate::sched::current_id();
+    crate::wm::text_out_in(
+        owner,
+        window_id as u32,
+        x as u32,
+        y as u32,
+        &bytes,
+        fg as u32,
+        bg as u32,
+    );
+    crate::wm::composite();
+    STATUS_SUCCESS
+}
+
+/// NtUserCreateWindow(x, y, w, h, style, out_hwnd): creates the caller's window and
+/// writes its id (u64) to `out_hwnd`, then composites.
+fn nt_user_create_window(x: u64, y: u64, w: u64, h: u64, style: u64, out: u64) -> u64 {
+    let owner = crate::sched::current_id();
+    let Some(id) =
+        crate::wm::create_window(owner, x as i32, y as i32, w as u32, h as u32, style as u32)
+    else {
+        return STATUS_INSUFFICIENT_RESOURCES;
+    };
+    if !crate::usercopy::copy_to_user(out, &(id as u64).to_le_bytes()) {
+        crate::wm::destroy_window(id);
+        return STATUS_ACCESS_VIOLATION;
+    }
+    crate::wm::composite();
     STATUS_SUCCESS
 }
 
@@ -737,19 +787,53 @@ pub extern "C" fn dispatch(nr: u64, a0: u64, a1: u64, a2: u64, _a3: u64, _user_r
             };
             nt_create_process(a0, a1, a2, _a3, cmd_len)
         }
-        NT_GDI_GET_FB_INFO => nt_gdi_get_fb_info(a0),
+        NT_GDI_GET_FB_INFO => nt_gdi_get_fb_info(a0, a1),
         NT_GDI_FILL_RECT => {
-            let Some(color) = stack_arg(_user_rsp, 0) else {
+            // NtGdiFillRect(window_id, x, y, w, h, color): a0..a3 in registers, h and
+            // color on the user stack.
+            let (Some(h), Some(color)) = (stack_arg(_user_rsp, 0), stack_arg(_user_rsp, 1)) else {
                 return STATUS_ACCESS_VIOLATION;
             };
-            crate::fbcon::fill_rect(a0 as u32, a1 as u32, a2 as u32, _a3 as u32, color as u32);
+            let owner = crate::sched::current_id();
+            crate::wm::fill_rect_in(
+                owner,
+                a0 as u32,
+                a1 as u32,
+                a2 as u32,
+                _a3 as u32,
+                h as u32,
+                color as u32,
+            );
+            crate::wm::composite();
             STATUS_SUCCESS
         }
         NT_GDI_TEXT_OUT => {
-            let (Some(fg), Some(bg)) = (stack_arg(_user_rsp, 0), stack_arg(_user_rsp, 1)) else {
+            // NtGdiTextOut(window_id, x, y, str_ptr, len, fg, bg): len/fg/bg on the stack.
+            let (Some(len), Some(fg), Some(bg)) = (
+                stack_arg(_user_rsp, 0),
+                stack_arg(_user_rsp, 1),
+                stack_arg(_user_rsp, 2),
+            ) else {
                 return STATUS_ACCESS_VIOLATION;
             };
-            nt_gdi_text_out(a0, a1, a2, _a3, fg, bg)
+            nt_gdi_text_out(a0, a1, a2, _a3, len, fg, bg)
+        }
+        NT_USER_CREATE_WINDOW => {
+            // NtUserCreateWindow(x, y, w, h, style, out_hwnd): style/out_hwnd on the stack.
+            let (Some(style), Some(out)) = (stack_arg(_user_rsp, 0), stack_arg(_user_rsp, 1))
+            else {
+                return STATUS_ACCESS_VIOLATION;
+            };
+            nt_user_create_window(a0, a1, a2, _a3, style, out)
+        }
+        NT_USER_DESTROY_WINDOW => {
+            crate::wm::destroy_window(a0 as u32);
+            crate::wm::composite();
+            STATUS_SUCCESS
+        }
+        NT_USER_FLUSH_WINDOW => {
+            crate::wm::composite();
+            STATUS_SUCCESS
         }
         NT_USER_GET_KEY_EVENT => nt_user_get_key_event(a0),
         NT_USER_GET_INPUT_EVENT => nt_user_get_input_event(a0),

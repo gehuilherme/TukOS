@@ -350,6 +350,9 @@ pub fn exit_current() -> ! {
 /// published (`ProcExit::finish`) while the thread and its space are still
 /// intact, strictly before the switch-away that lets the reaper free them.
 pub fn exit_current_with(status: u32) -> ! {
+    // Free any windows this thread owns (their kernel backbuffers) before it is reaped.
+    // `destroy_windows_of` locks only the WM mutex, so it is safe before the SCHED lock.
+    crate::wm::destroy_windows_of(current_id());
     arch_x86_64::interrupts::disable();
     {
         let mut guard = SCHED.lock();

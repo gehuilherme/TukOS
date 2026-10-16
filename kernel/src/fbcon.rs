@@ -89,6 +89,9 @@ impl FbCon {
     }
 
     /// Fills a rectangle, clamped to the framebuffer (no overflow, no OOB writes).
+    /// Direct-to-screen path; since Plano 25 the GDI syscalls draw through `wm`
+    /// backbuffers instead, so this is only used by the fbcon/cursor ktests.
+    #[cfg_attr(not(feature = "ktest"), allow(dead_code))]
     pub fn fill_rect(&mut self, x: u32, y: u32, w: u32, h: u32, color: u32) {
         self.cursor_hide_for_draw();
         self.fill_rect_inner(x, y, w, h, color);
@@ -109,13 +112,16 @@ impl FbCon {
     }
 
     /// Draws ASCII `bytes` at pixel (x, y), blending `bg` to `fg` by glyph
-    /// intensity; every pixel is clamped to the framebuffer.
+    /// intensity; every pixel is clamped to the framebuffer. Direct-to-screen path,
+    /// ktest-only since Plano 25 (GDI text now goes through `wm` backbuffers).
+    #[cfg_attr(not(feature = "ktest"), allow(dead_code))]
     pub fn text_out(&mut self, x: u32, y: u32, bytes: &[u8], fg: u32, bg: u32) {
         self.cursor_hide_for_draw();
         self.text_out_inner(x, y, bytes, fg, bg);
         self.cursor_show_after_draw();
     }
 
+    #[cfg_attr(not(feature = "ktest"), allow(dead_code))]
     fn text_out_inner(&mut self, x: u32, y: u32, bytes: &[u8], fg: u32, bg: u32) {
         let (cw, ch) = (Self::cell_width(), Self::cell_height());
         for (i, &b) in bytes.iter().enumerate() {
@@ -153,6 +159,35 @@ impl FbCon {
         self.col = 0;
         self.row = 0;
         self.cursor_show_after_draw();
+    }
+
+    /// Fills the whole framebuffer with `rgb` (0x00RRGGBB). Assumes the lock is held;
+    /// used by the compositor as the desktop background.
+    fn fill_whole(&mut self, rgb: u32) {
+        let rgb = rgb & 0x00FF_FFFF;
+        for y in 0..self.height {
+            for x in 0..self.width {
+                self.put_raw(x, y, rgb);
+            }
+        }
+    }
+
+    /// Blits a `w` x `h` window backbuffer (`buf`, row-major, `buf[sy*w+sx]`) placed
+    /// at screen `(x, y)` onto the framebuffer, clipped to the screen via `gfx`.
+    /// Assumes the lock is held. No OOB on either buffer.
+    fn blit_window(&mut self, x: i32, y: i32, w: u32, h: u32, buf: &[u32]) {
+        let Some(b) = gfx::blit_clip(x, y, w, h, self.width as u32, self.height as u32) else {
+            return;
+        };
+        let wrow = w as usize;
+        for row in 0..b.h {
+            let sy = b.src_y + row;
+            let dy = b.dst_y + row;
+            let src_row = &buf[sy * wrow + b.src_x..sy * wrow + b.src_x + b.w];
+            for (col, &px) in src_row.iter().enumerate() {
+                self.put_raw(b.dst_x + col, dy, px & 0x00FF_FFFF);
+            }
+        }
     }
 
     // --- Camada de cursor (todos assumem o lock do FBCON ja tomado) ---
@@ -282,7 +317,7 @@ impl fmt::Write for FbCon {
 }
 
 /// Per-channel blend of `bg` towards `fg` by `t` (0..=255).
-fn blend(fg: u32, bg: u32, t: u8) -> u32 {
+pub(crate) fn blend(fg: u32, bg: u32, t: u8) -> u32 {
     let t = t as u32;
     let mut out = 0;
     for shift in [0u32, 8, 16] {
@@ -301,12 +336,16 @@ pub fn fb_info() -> Option<(u32, u32, u32)> {
         .map(|c| (c.width as u32, c.height as u32, 32))
 }
 
+/// Direct-to-screen fill; ktest-only since Plano 25 (GDI goes through `wm`).
+#[cfg_attr(not(feature = "ktest"), allow(dead_code))]
 pub fn fill_rect(x: u32, y: u32, w: u32, h: u32, color: u32) {
     if let Some(con) = FBCON.lock().as_mut() {
         con.fill_rect(x, y, w, h, color);
     }
 }
 
+/// Direct-to-screen text; ktest-only since Plano 25 (GDI goes through `wm`).
+#[cfg_attr(not(feature = "ktest"), allow(dead_code))]
 pub fn text_out(x: u32, y: u32, bytes: &[u8], fg: u32, bg: u32) {
     if let Some(con) = FBCON.lock().as_mut() {
         con.text_out(x, y, bytes, fg, bg);
@@ -362,6 +401,63 @@ pub fn pixel(x: u32, y: u32) -> Option<u32> {
     let con = g.as_ref()?;
     ((x as usize) < con.width && (y as usize) < con.height)
         .then(|| con.pixel(x as usize, y as usize) & 0x00FF_FFFF)
+}
+
+/// A framebuffer surface handed to a compositor callback by [`compose`]: the cursor
+/// is already hidden and is restored on top once the callback returns. Every method
+/// clips to the framebuffer (no OOB).
+pub struct Frame<'a> {
+    con: &'a mut FbCon,
+}
+
+impl Frame<'_> {
+    /// Paints the whole framebuffer with the desktop background `rgb`.
+    pub fn fill_bg(&mut self, rgb: u32) {
+        self.con.fill_whole(rgb);
+    }
+
+    /// Blits a window backbuffer (`buf[sy*w+sx]`) at screen `(x, y)`, clipped.
+    pub fn blit(&mut self, x: i32, y: i32, w: u32, h: u32, buf: &[u32]) {
+        self.con.blit_window(x, y, w, h, buf);
+    }
+
+    /// Fills a screen-space rectangle (window frame/border), clamped to the screen.
+    pub fn fill_rect(&mut self, x: i32, y: i32, w: u32, h: u32, rgb: u32) {
+        if x < 0 || y < 0 {
+            // Negative origins: clip the top-left by shrinking into on-screen space.
+            let (cx, cw) = clip_edge(x, w);
+            let (cy, ch) = clip_edge(y, h);
+            self.con.fill_rect_inner(cx, cy, cw, ch, rgb);
+        } else {
+            self.con.fill_rect_inner(x as u32, y as u32, w, h, rgb);
+        }
+    }
+}
+
+/// Clips one axis of a rect with a possibly-negative origin to non-negative space.
+fn clip_edge(origin: i32, extent: u32) -> (u32, u32) {
+    if origin >= 0 {
+        (origin as u32, extent)
+    } else {
+        let off = (-(origin as i64)) as u64;
+        let ext = u64::from(extent).saturating_sub(off);
+        (0, ext as u32)
+    }
+}
+
+/// Runs the compositor callback `paint` with the mouse cursor hidden, under the
+/// FBCON lock, then restores the cursor on top. Does nothing if the framebuffer is
+/// not initialised. The callback must not re-enter FBCON (no `fbcon::*` that locks).
+pub fn compose<F: FnOnce(&mut Frame)>(paint: F) {
+    let mut g = FBCON.lock();
+    if let Some(con) = g.as_mut() {
+        con.cursor_hide_for_draw();
+        {
+            let mut frame = Frame { con: &mut *con };
+            paint(&mut frame);
+        }
+        con.cursor_show_after_draw();
+    }
 }
 
 pub fn init_from_limine() {

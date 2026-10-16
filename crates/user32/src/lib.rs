@@ -74,10 +74,12 @@ static _fltused: i32 = 0;
 #[link(name = "ntdll", kind = "raw-dylib")]
 unsafe extern "system" {
     fn NtTerminateProcess(process: isize, status: i32) -> i32;
-    // NtGdiGetFbInfo(out): writes [width:u32, height:u32, bpp:u32] (kernel syscall 14).
-    fn NtGdiGetFbInfo(out: *mut u32) -> i32;
-    // NtGdiFillRect(x, y, w, h, color): paints a 0x00RRGGBB rectangle (syscall 15).
-    fn NtGdiFillRect(x: u32, y: u32, w: u32, h: u32, color: u32) -> i32;
+    // NtGdiGetFbInfo(window_id, out): writes [width:u32, height:u32, bpp:u32] for the
+    // window's client area (window_id 0 = screen size) (kernel syscall 14).
+    fn NtGdiGetFbInfo(window_id: u32, out: *mut u32) -> i32;
+    // NtGdiFillRect(window_id, x, y, w, h, color): paints a 0x00RRGGBB rectangle into the
+    // window's backbuffer (window_id 0 = implicit full-screen compat window) (syscall 15).
+    fn NtGdiFillRect(window_id: u32, x: u32, y: u32, w: u32, h: u32, color: u32) -> i32;
     // NtUserGetInputEvent(out): BLOCKS in the kernel until an input event, then writes
     // 5 x u32 (syscall 18): key   = [0, vk, ch, down, 0];
     //                       mouse = [1, x, y, buttons (bit0 L, bit1 R, bit2 M), kind]
@@ -280,7 +282,9 @@ fn get_wndproc() -> usize {
 /// `(width, height)` of the screen (the window's client area), 0,0 if unavailable.
 fn screen_size() -> (u32, u32) {
     let mut info = [0u32; 3];
-    if unsafe { NtGdiGetFbInfo(info.as_mut_ptr()) } >= 0 {
+    // Task 1: single-window compat — window id 0 is the process's implicit full-screen
+    // window (Task 2 threads the real hwnd here for multi-window).
+    if unsafe { NtGdiGetFbInfo(0, info.as_mut_ptr()) } >= 0 {
         (info[0], info[1])
     } else {
         (0, 0)
@@ -607,7 +611,8 @@ pub extern "system" fn FillRect(_hdc: HDC, lprc: *const RECT, hbr: HBRUSH) -> i3
     let w = (r.right - left) as u32;
     let h = (r.bottom - top) as u32;
     let rgb = colorref_to_rgb(brush_colorref(hbr).unwrap_or(0));
-    unsafe { NtGdiFillRect(left as u32, top as u32, w, h, rgb) };
+    // Window id 0: the process's implicit full-screen compat window (Task 1).
+    unsafe { NtGdiFillRect(0, left as u32, top as u32, w, h, rgb) };
     1
 }
 

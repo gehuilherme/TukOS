@@ -138,6 +138,8 @@ const TESTS: &[(&str, TestFn)] = &[
     ("echo_reads_and_prints", echo_reads_and_prints),
     ("cursor_save_under", cursor_save_under),
     ("cursor_follows_mouse", cursor_follows_mouse),
+    ("wm_compose_one", wm_compose_one),
+    ("wm_compose_fullscreen", wm_compose_fullscreen),
     ("window_paints", window_paints),
     ("gui_hello_window", gui_hello_window),
     ("window_keyboard_echo", window_keyboard_echo),
@@ -1833,6 +1835,89 @@ fn cursor_follows_mouse() -> Result<(), &'static str> {
     }
     while crate::kbd::try_pop_input_event().is_some() {}
     r
+}
+
+/// Owner tids for the compositor tests: large constants so they never collide with a
+/// real scheduler slot index (and are never touched by `exit_current`).
+const WM_OWNER_ONE: usize = 0x7701;
+const WM_OWNER_FULL: usize = 0x7702;
+
+/// Compositor: a positioned (non-full-screen) window's backbuffer lands at its SCREEN
+/// position, with the desktop background visible around it.
+fn wm_compose_one() -> Result<(), &'static str> {
+    const A: u32 = 0x0012_3456;
+    const DESKTOP_BG: u32 = 0x0020_3040;
+    if let Some(con) = crate::fbcon::FBCON.lock().as_mut() {
+        con.clear();
+    }
+    let id = crate::wm::create_window(WM_OWNER_ONE, 100, 80, 200, 150, 0)
+        .ok_or("wm_compose_one: create_window falhou")?;
+    // Fill a rect in CLIENT coords (10,10)-(60,50); composite to the framebuffer.
+    crate::wm::fill_rect_in(WM_OWNER_ONE, id, 10, 10, 50, 40, A);
+    crate::wm::composite();
+    let cleanup = || {
+        crate::wm::destroy_window(id);
+        if let Some(con) = crate::fbcon::FBCON.lock().as_mut() {
+            con.clear();
+        }
+    };
+    // Client (20,20) -> screen (120,100): colour A.
+    if crate::fbcon::pixel(120, 100) != Some(A) {
+        cleanup();
+        return Err("wm_compose_one: cor A ausente na posicao de tela da janela");
+    }
+    // Inside the window but outside the filled rect: the (black) backbuffer.
+    if crate::fbcon::pixel(250, 200) != Some(0) {
+        cleanup();
+        return Err("wm_compose_one: area nao pintada da janela deveria ser preta");
+    }
+    // Clearly outside the window: the desktop background.
+    if crate::fbcon::pixel(500, 400) != Some(DESKTOP_BG) {
+        cleanup();
+        return Err("wm_compose_one: fundo-de-tela ausente fora da janela");
+    }
+    cleanup();
+    Ok(())
+}
+
+/// Compat proof: a full-screen-at-origin window composites byte-identically to the old
+/// direct framebuffer path — content at the same screen pixels, no frame, the desktop
+/// background fully covered (the window's own black backbuffer shows, not 0x203040).
+fn wm_compose_fullscreen() -> Result<(), &'static str> {
+    const B: u32 = 0x0000_00FF;
+    const DESKTOP_BG: u32 = 0x0020_3040;
+    if let Some(con) = crate::fbcon::FBCON.lock().as_mut() {
+        con.clear();
+    }
+    let (sw, sh, _) = crate::fbcon::fb_info().ok_or("wm_compose_fullscreen: sem framebuffer")?;
+    let id = crate::wm::create_window(WM_OWNER_FULL, 0, 0, sw, sh, crate::wm::STYLE_COMPAT)
+        .ok_or("wm_compose_fullscreen: create_window falhou")?;
+    // Client (50,50) must map 1:1 to screen (50,50) (no frame offset).
+    crate::wm::fill_rect_in(WM_OWNER_FULL, id, 50, 50, 20, 20, B);
+    crate::wm::composite();
+    let cleanup = || {
+        crate::wm::destroy_window(id);
+        if let Some(con) = crate::fbcon::FBCON.lock().as_mut() {
+            con.clear();
+        }
+    };
+    if crate::fbcon::pixel(55, 55) != Some(B) {
+        cleanup();
+        return Err("wm_compose_fullscreen: conteudo nao caiu na posicao de tela compat");
+    }
+    // Away from the rect: the full-screen window's own black backbuffer (as a cleared
+    // framebuffer would read in the old direct-draw model), NOT the desktop background.
+    if crate::fbcon::pixel(400, 300) != Some(0) {
+        cleanup();
+        return Err("wm_compose_fullscreen: pixel compat deveria ser preto (nao desktop bg)");
+    }
+    // The desktop background must be fully covered: it must not appear at the origin.
+    if crate::fbcon::pixel(0, 0) == Some(DESKTOP_BG) {
+        cleanup();
+        return Err("wm_compose_fullscreen: desktop bg vazou (janela full-screen cobre tudo)");
+    }
+    cleanup();
+    Ok(())
 }
 
 fn timer_ticks_advance() -> Result<(), &'static str> {

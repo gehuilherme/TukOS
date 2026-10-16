@@ -55,7 +55,17 @@ static _fltused: i32 = 0;
 #[link(name = "ntdll", kind = "raw-dylib")]
 unsafe extern "system" {
     fn NtTerminateProcess(process: isize, status: i32) -> i32;
-    fn NtGdiTextOut(x: u32, y: u32, text: *const u8, len: u32, fg: u32, bg: u32) -> i32;
+    // NtGdiTextOut(window_id, x, y, text, len, fg, bg): draws into the window's
+    // backbuffer (window_id 0 = implicit full-screen compat window) (syscall 16).
+    fn NtGdiTextOut(
+        window_id: u32,
+        x: u32,
+        y: u32,
+        text: *const u8,
+        len: u32,
+        fg: u32,
+        bg: u32,
+    ) -> i32;
 }
 
 pub type HDC = isize;
@@ -161,6 +171,7 @@ pub extern "system" fn TextOutA(_hdc: HDC, x: i32, y: i32, text: *const u8, coun
     } else {
         colorref_to_rgb(BK_COLOR.load(Ordering::Relaxed))
     };
-    let st = unsafe { NtGdiTextOut(x as u32, y as u32, text, count as u32, fg, bg) };
+    // Window id 0: the process's implicit full-screen compat window (Task 1).
+    let st = unsafe { NtGdiTextOut(0, x as u32, y as u32, text, count as u32, fg, bg) };
     (st >= 0) as BOOL
 }

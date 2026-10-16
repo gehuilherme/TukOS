@@ -229,6 +229,26 @@ pub extern "system" fn NtUserGetInputEvent() {
     core::arch::naked_asm!("mov r10, rcx", "mov eax, 18", "syscall", "ret");
 }
 
+// Window-manager extensions (NT_USER_CREATE_WINDOW = 19, NT_USER_DESTROY_WINDOW = 20,
+// NT_USER_FLUSH_WINDOW = 21); arg layouts documented in kernel/src/syscall.rs.
+#[unsafe(naked)]
+#[unsafe(no_mangle)]
+pub extern "system" fn NtUserCreateWindow() {
+    core::arch::naked_asm!("mov r10, rcx", "mov eax, 19", "syscall", "ret");
+}
+
+#[unsafe(naked)]
+#[unsafe(no_mangle)]
+pub extern "system" fn NtUserDestroyWindow() {
+    core::arch::naked_asm!("mov r10, rcx", "mov eax, 20", "syscall", "ret");
+}
+
+#[unsafe(naked)]
+#[unsafe(no_mangle)]
+pub extern "system" fn NtUserFlushWindow() {
+    core::arch::naked_asm!("mov r10, rcx", "mov eax, 21", "syscall", "ret");
+}
+
 /// `RtlExitUserProcess(code)`: a real function (NOT a bare forwarder to the
 /// 2-arg `NtTerminateProcess`) that terminates the current process with `code`.
 #[unsafe(no_mangle)]

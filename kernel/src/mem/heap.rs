@@ -6,10 +6,14 @@ use core::alloc::{GlobalAlloc, Layout};
 use mm::heap::FreeListHeap;
 use mm::paging::PageFlags;
 
-/// Heap virtual window: 2 MiB starting here (above the kernel image, below the
-/// HHDM). 512 pages.
+/// Heap virtual window: starting here (above the kernel image, below the HHDM).
+/// Plano 25 raised this from 512 pages (2 MiB) to 8 MiB so a per-window
+/// full-screen backbuffer (e.g. 1024x768x4 = 3 MiB) fits on the kernel heap; the
+/// window still lives entirely inside one PML4 entry, so the higher-half mapping
+/// is unaffected. The backing frames are mapped once at init, so heap alloc/free
+/// never changes `free_frame_count` (the per-test frame accounting is unaffected).
 const HEAP_START: u64 = 0xffff_ff80_0000_0000;
-const HEAP_PAGES: u64 = 512;
+const HEAP_PAGES: u64 = 2048;
 const HEAP_SIZE: usize = (HEAP_PAGES * 4096) as usize;
 
 struct LockedHeap(IrqMutex<FreeListHeap>);
