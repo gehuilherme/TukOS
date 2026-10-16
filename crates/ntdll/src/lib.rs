@@ -221,6 +221,14 @@ pub extern "system" fn NtUserGetKeyEvent() {
     core::arch::naked_asm!("mov r10, rcx", "mov eax, 17", "syscall", "ret");
 }
 
+// NT_USER_GET_INPUT_EVENT = 18: blocking unified input event (5 x u32: tag, a, b, c, d;
+// tag 0 = key {vk, ch, down}, tag 1 = mouse {x, y, buttons, kind}).
+#[unsafe(naked)]
+#[unsafe(no_mangle)]
+pub extern "system" fn NtUserGetInputEvent() {
+    core::arch::naked_asm!("mov r10, rcx", "mov eax, 18", "syscall", "ret");
+}
+
 /// `RtlExitUserProcess(code)`: a real function (NOT a bare forwarder to the
 /// 2-arg `NtTerminateProcess`) that terminates the current process with `code`.
 #[unsafe(no_mangle)]

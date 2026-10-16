@@ -36,6 +36,15 @@ pub const NT_GDI_TEXT_OUT: u64 = 16;
 /// `(out_key_event_ptr)`: BLOCKS until a key event; writes `KeyEventAbi { vk, ch, flags }`
 /// (3 x u32, flags bit0 = down).
 pub const NT_USER_GET_KEY_EVENT: u64 = 17;
+/// `(out_input_event_ptr)`: BLOCKS until ANY input event (key or mouse); writes
+/// `InputEventAbi` = 5 x u32 `{ tag, a, b, c, d }`.
+/// tag 0 = key:   a = vk, b = ch, c = down (0/1), d = 0.
+/// tag 1 = mouse: a = x, b = y (i32 as u32, already clamped to the framebuffer),
+///                c = buttons (bit0 left, bit1 right, bit2 middle),
+///                d = kind: 0 = move, 1 = left down, 2 = left up, 3 = right down,
+///                4 = right up, 5 = middle down, 6 = middle up.
+/// (Nr 17 keeps returning only KEY events; mouse events ahead of a key are skipped.)
+pub const NT_USER_GET_INPUT_EVENT: u64 = 18;
 /// Max bytes accepted by NtGdiTextOut.
 const GDI_TEXT_MAX: u64 = 4096;
 #[cfg(feature = "ktest")]
@@ -617,6 +626,50 @@ fn nt_user_get_key_event(out: u64) -> u64 {
     }
 }
 
+/// NtUserGetInputEvent: blocking pop of the unified input queue (key or mouse).
+fn nt_user_get_input_event(out: u64) -> u64 {
+    use kbd::{InputEvent, MouseButton, MouseKind};
+    if !crate::usercopy::copy_to_user(out, &[0u8; 20]) {
+        return STATUS_ACCESS_VIOLATION;
+    }
+    let ev = loop {
+        if let Some(e) = crate::kbd::try_pop_input_event() {
+            break e;
+        }
+        crate::kbd::poll();
+        crate::sched::yield_now();
+    };
+    let words: [u32; 5] = match ev {
+        InputEvent::Key { vk, ch, down } => [0, vk as u32, ch, down as u32, 0],
+        InputEvent::Mouse {
+            x,
+            y,
+            buttons,
+            kind,
+        } => {
+            let k = match kind {
+                MouseKind::Move => 0,
+                MouseKind::Down(MouseButton::Left) => 1,
+                MouseKind::Up(MouseButton::Left) => 2,
+                MouseKind::Down(MouseButton::Right) => 3,
+                MouseKind::Up(MouseButton::Right) => 4,
+                MouseKind::Down(MouseButton::Middle) => 5,
+                MouseKind::Up(MouseButton::Middle) => 6,
+            };
+            [1, x as u32, y as u32, buttons as u32, k]
+        }
+    };
+    let mut buf = [0u8; 20];
+    for (i, w) in words.iter().enumerate() {
+        buf[i * 4..i * 4 + 4].copy_from_slice(&w.to_le_bytes());
+    }
+    if crate::usercopy::copy_to_user(out, &buf) {
+        STATUS_SUCCESS
+    } else {
+        STATUS_ACCESS_VIOLATION
+    }
+}
+
 fn nt_gdi_text_out(x: u64, y: u64, ptr: u64, len: u64, fg: u64, bg: u64) -> u64 {
     let len = (len as u32 as u64).min(GDI_TEXT_MAX);
     let bytes = if len == 0 {
@@ -699,6 +752,7 @@ pub extern "C" fn dispatch(nr: u64, a0: u64, a1: u64, a2: u64, _a3: u64, _user_r
             nt_gdi_text_out(a0, a1, a2, _a3, fg, bg)
         }
         NT_USER_GET_KEY_EVENT => nt_user_get_key_event(a0),
+        NT_USER_GET_INPUT_EVENT => nt_user_get_input_event(a0),
         NT_WAIT => nt_wait(a0),
         NT_QUERY_EXIT_CODE => nt_query_exit_code(a0, a1),
         NT_ALLOCATE_VIRTUAL_MEMORY => {

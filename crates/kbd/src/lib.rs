@@ -199,6 +199,223 @@ impl Default for EventRing {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Mouse PS/2 (pacote padrao de 3 bytes) e eventos de entrada unificados.
+// ---------------------------------------------------------------------------
+
+/// Pacote de mouse decodificado. `dy` e positivo para CIMA (convencao PS/2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct MousePacket {
+    pub dx: i16,
+    pub dy: i16,
+    pub left: bool,
+    pub right: bool,
+    pub middle: bool,
+}
+
+/// Acumulador de bytes -> pacote. Ressincroniza pelo bit 3 do byte 0 (sempre 1).
+#[derive(Debug, Clone, Copy, Default)]
+pub struct MouseDecoder {
+    buf: [u8; 3],
+    n: usize,
+}
+
+impl MouseDecoder {
+    pub const fn new() -> Self {
+        Self { buf: [0; 3], n: 0 }
+    }
+
+    /// Alimenta um byte; devolve um pacote quando completa 3 bytes validos.
+    /// Overflow (bits 6/7 do byte 0) satura o delta em +-255.
+    pub fn feed(&mut self, byte: u8) -> Option<MousePacket> {
+        if self.n == 0 && byte & 0x08 == 0 {
+            return None; // byte 0 invalido: descarta e ressincroniza
+        }
+        self.buf[self.n] = byte;
+        self.n += 1;
+        if self.n < 3 {
+            return None;
+        }
+        self.n = 0;
+        let b0 = self.buf[0];
+        let axis = |raw: u8, neg: bool, ovf: bool| -> i16 {
+            if ovf {
+                if neg { -255 } else { 255 }
+            } else if neg {
+                raw as i16 - 256
+            } else {
+                raw as i16
+            }
+        };
+        Some(MousePacket {
+            dx: axis(self.buf[1], b0 & 0x10 != 0, b0 & 0x40 != 0),
+            dy: axis(self.buf[2], b0 & 0x20 != 0, b0 & 0x80 != 0),
+            left: b0 & 1 != 0,
+            right: b0 & 2 != 0,
+            middle: b0 & 4 != 0,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MouseButton {
+    Left,
+    Right,
+    Middle,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MouseKind {
+    Move,
+    Down(MouseButton),
+    Up(MouseButton),
+}
+
+/// Evento de entrada unificado (teclado + mouse).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InputEvent {
+    Key {
+        vk: u16,
+        ch: u32,
+        down: bool,
+    },
+    Mouse {
+        x: i32,
+        y: i32,
+        buttons: u8,
+        kind: MouseKind,
+    },
+}
+
+impl From<KeyEvent> for InputEvent {
+    fn from(k: KeyEvent) -> Self {
+        InputEvent::Key {
+            vk: k.vk,
+            ch: k.ch,
+            down: k.down,
+        }
+    }
+}
+
+/// Posicao + botoes (bit0 esq, bit1 dir, bit2 meio) do cursor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct MouseState {
+    pub x: i32,
+    pub y: i32,
+    pub buttons: u8,
+}
+
+impl MouseState {
+    pub const fn new() -> Self {
+        Self {
+            x: 0,
+            y: 0,
+            buttons: 0,
+        }
+    }
+
+    /// Aplica um pacote: x += dx, y -= dy (tela cresce para baixo), clamp a
+    /// `[0,w) x [0,h)`. Devolve ate 4 eventos: Move (se houve delta) e depois
+    /// Down/Up por botao alterado (esq, dir, meio).
+    pub fn apply(&mut self, p: MousePacket, w: i32, h: i32) -> [Option<InputEvent>; 4] {
+        let mut out = [None; 4];
+        let mut n = 0;
+        self.x = (self.x + p.dx as i32).clamp(0, (w - 1).max(0));
+        self.y = (self.y - p.dy as i32).clamp(0, (h - 1).max(0));
+        let new = p.left as u8 | (p.right as u8) << 1 | (p.middle as u8) << 2;
+        let old = self.buttons;
+        self.buttons = new;
+        let mk = |s: &Self, kind| InputEvent::Mouse {
+            x: s.x,
+            y: s.y,
+            buttons: s.buttons,
+            kind,
+        };
+        if p.dx != 0 || p.dy != 0 {
+            out[n] = Some(mk(self, MouseKind::Move));
+            n += 1;
+        }
+        for (bit, b) in [
+            (1u8, MouseButton::Left),
+            (2, MouseButton::Right),
+            (4, MouseButton::Middle),
+        ] {
+            if (old ^ new) & bit != 0 {
+                let kind = if new & bit != 0 {
+                    MouseKind::Down(b)
+                } else {
+                    MouseKind::Up(b)
+                };
+                out[n] = Some(mk(self, kind));
+                n += 1;
+            }
+        }
+        out
+    }
+}
+
+/// FIFO limitada de `InputEvent`. Cheia: descarta o evento mais ANTIGO.
+pub struct InputRing {
+    buf: [Option<InputEvent>; Self::CAP],
+    head: usize,
+    len: usize,
+}
+
+impl InputRing {
+    pub const CAP: usize = 64;
+
+    pub const fn new() -> Self {
+        Self {
+            buf: [None; Self::CAP],
+            head: 0,
+            len: 0,
+        }
+    }
+
+    pub fn push(&mut self, e: InputEvent) {
+        if self.len == Self::CAP {
+            self.head = (self.head + 1) % Self::CAP;
+            self.len -= 1;
+        }
+        self.buf[(self.head + self.len) % Self::CAP] = Some(e);
+        self.len += 1;
+    }
+
+    pub fn pop(&mut self) -> Option<InputEvent> {
+        if self.len == 0 {
+            return None;
+        }
+        let e = self.buf[self.head].take();
+        self.head = (self.head + 1) % Self::CAP;
+        self.len -= 1;
+        e
+    }
+
+    /// Retira o proximo evento de TECLA, descartando eventos de mouse que o precedem.
+    pub fn pop_key(&mut self) -> Option<KeyEvent> {
+        while let Some(e) = self.pop() {
+            if let InputEvent::Key { vk, ch, down } = e {
+                return Some(KeyEvent { vk, ch, down });
+            }
+        }
+        None
+    }
+
+    pub fn len(&self) -> usize {
+        self.len
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+}
+
+impl Default for InputRing {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// FIFO de bytes de tamanho fixo. Cheio: descarta o byte mais novo.
 pub struct RingBuffer {
     buf: [u8; Self::CAP],
@@ -371,6 +588,117 @@ mod tests {
         for sc in 0..=255u8 {
             let _ = decode_event(sc, &mut s);
         }
+    }
+
+    fn feed3(d: &mut MouseDecoder, b: [u8; 3]) -> Option<MousePacket> {
+        d.feed(b[0]);
+        d.feed(b[1]);
+        d.feed(b[2])
+    }
+
+    #[test]
+    fn mouse_move_plus_x_minus_y() {
+        let mut d = MouseDecoder::new();
+        // byte0: bit3 + Y sign (0x20); dx=+5, dy=-3 (0xFD)
+        let p = feed3(&mut d, [0x28, 5, 0xFD]).unwrap();
+        assert_eq!((p.dx, p.dy), (5, -3));
+        assert!(!p.left && !p.right && !p.middle);
+    }
+
+    #[test]
+    fn mouse_negative_x_and_buttons() {
+        let mut d = MouseDecoder::new();
+        let p = feed3(&mut d, [0x18 | 1, 0xF6, 4]).unwrap();
+        assert_eq!((p.dx, p.dy), (-10, 4));
+        assert!(p.left && !p.right && !p.middle);
+        assert!(feed3(&mut d, [0x08 | 2, 0, 0]).unwrap().right);
+        assert!(feed3(&mut d, [0x08 | 4, 0, 0]).unwrap().middle);
+    }
+
+    #[test]
+    fn mouse_overflow_saturates() {
+        let mut d = MouseDecoder::new();
+        let p = feed3(&mut d, [0x08 | 0x40 | 0x80, 0x10, 0x10]).unwrap();
+        assert_eq!((p.dx, p.dy), (255, 255));
+        let p = feed3(&mut d, [0x08 | 0x40 | 0x80 | 0x10 | 0x20, 0x10, 0x10]).unwrap();
+        assert_eq!((p.dx, p.dy), (-255, -255));
+    }
+
+    #[test]
+    fn mouse_resync_on_bad_byte0() {
+        let mut d = MouseDecoder::new();
+        assert_eq!(d.feed(0x00), None); // bit3==0: descartado
+        assert_eq!(d.feed(0x07), None);
+        let p = feed3(&mut d, [0x09, 1, 2]).unwrap();
+        assert_eq!((p.dx, p.dy, p.left), (1, 2, true));
+        for b in 0..=255u8 {
+            let _ = d.feed(b);
+        }
+    }
+
+    #[test]
+    fn mouse_state_clamp_and_events() {
+        let mut s = MouseState::new();
+        let pk = |dx, dy, l| MousePacket {
+            dx,
+            dy,
+            left: l,
+            right: false,
+            middle: false,
+        };
+        // y -= dy: dy negativo (mouse para baixo) aumenta y
+        let ev = s.apply(pk(10, -20, false), 100, 50);
+        assert_eq!((s.x, s.y), (10, 20));
+        assert_eq!(
+            ev[0],
+            Some(InputEvent::Mouse {
+                x: 10,
+                y: 20,
+                buttons: 0,
+                kind: MouseKind::Move
+            })
+        );
+        assert_eq!(ev[1], None);
+        let ev = s.apply(pk(0, 0, true), 100, 50);
+        assert_eq!(
+            ev[0],
+            Some(InputEvent::Mouse {
+                x: 10,
+                y: 20,
+                buttons: 1,
+                kind: MouseKind::Down(MouseButton::Left)
+            })
+        );
+        let ev = s.apply(pk(500, -500, false), 100, 50);
+        assert_eq!((s.x, s.y), (99, 49));
+        assert!(matches!(
+            ev[1],
+            Some(InputEvent::Mouse {
+                kind: MouseKind::Up(MouseButton::Left),
+                ..
+            })
+        ));
+        s.apply(pk(-500, 500, false), 100, 50);
+        assert_eq!((s.x, s.y), (0, 0));
+    }
+
+    #[test]
+    fn input_ring_mixed_and_pop_key() {
+        let mut r = InputRing::new();
+        let m = InputEvent::Mouse {
+            x: 1,
+            y: 2,
+            buttons: 0,
+            kind: MouseKind::Move,
+        };
+        r.push(m);
+        r.push(ev(0x41, 0, true).into());
+        assert_eq!(r.pop_key(), Some(ev(0x41, 0, true)));
+        assert_eq!(r.pop_key(), None);
+        for _ in 0..(InputRing::CAP + 5) {
+            r.push(m);
+        }
+        assert_eq!(r.len(), InputRing::CAP);
     }
 
     #[test]

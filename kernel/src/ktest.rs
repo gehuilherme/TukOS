@@ -88,6 +88,7 @@ const TESTS: &[(&str, TestFn)] = &[
     ("ntwritefile_bad_handle", ntwritefile_bad_handle),
     ("console_read_returns_input", console_read_returns_input),
     ("key_event_queue", key_event_queue),
+    ("mouse_events", mouse_events),
     ("exe_imports_ntdll_and_runs", exe_imports_ntdll_and_runs),
     (
         "usermode_loader_rejects_bad_iat",
@@ -1669,6 +1670,123 @@ fn key_event_queue() -> Result<(), &'static str> {
     while crate::kbd::try_pop_input().is_some() {}
     if n != kbd::EventRing::CAP {
         return Err("fila de eventos nao e limitada");
+    }
+    Ok(())
+}
+
+fn mouse_events() -> Result<(), &'static str> {
+    use kbd::{InputEvent, MouseButton, MouseKind};
+    while crate::kbd::try_pop_input_event().is_some() {}
+    while crate::kbd::try_pop_input().is_some() {}
+    let (w, h) = crate::fbcon::fb_info()
+        .map(|(w, h, _)| (w as i32, h as i32))
+        .ok_or("sem framebuffer")?;
+    // Ancora: arrasta ao canto (0,0) (dx=-255 e dy=+255 repetidos, clamp).
+    for _ in 0..(w.max(h) / 255 + 2) {
+        // byte0: bit3 + X sign (0x10); dx=-255 nao cabe: usa -128 (0x80) e dy=+127.
+        for b in [0x18u8, 0x80, 0x7F] {
+            crate::kbd::route_byte(b, true);
+        }
+    }
+    while crate::kbd::try_pop_input_event().is_some() {}
+    // +10 em x, -20 (para baixo) em y: byte0 = bit3 | Y sign.
+    for b in [0x28u8, 10, 0xEC] {
+        crate::kbd::route_byte(b, true);
+    }
+    let want = InputEvent::Mouse {
+        x: 10,
+        y: 20,
+        buttons: 0,
+        kind: MouseKind::Move,
+    };
+    if crate::kbd::try_pop_input_event() != Some(want) {
+        return Err("evento Move inesperado");
+    }
+    // botao esquerdo apertado sem mover
+    for b in [0x09u8, 0, 0] {
+        crate::kbd::route_byte(b, true);
+    }
+    let want = InputEvent::Mouse {
+        x: 10,
+        y: 20,
+        buttons: 1,
+        kind: MouseKind::Down(MouseButton::Left),
+    };
+    if crate::kbd::try_pop_input_event() != Some(want) {
+        return Err("evento Down inesperado");
+    }
+    // solta o botao e move +1 em x (Move + Up)
+    for b in [0x08u8, 1, 0] {
+        crate::kbd::route_byte(b, true);
+    }
+    let m = crate::kbd::try_pop_input_event();
+    let u = crate::kbd::try_pop_input_event();
+    if !matches!(
+        m,
+        Some(InputEvent::Mouse {
+            x: 11,
+            y: 20,
+            kind: MouseKind::Move,
+            ..
+        })
+    ) || !matches!(
+        u,
+        Some(InputEvent::Mouse {
+            buttons: 0,
+            kind: MouseKind::Up(MouseButton::Left),
+            ..
+        })
+    ) {
+        return Err("Move/Up inesperados");
+    }
+    // clamp ao limite superior da tela
+    for _ in 0..(w.max(h) / 127 + 2) {
+        // byte0 = bit3 | Y sign: dx=+127, dy=0x81 (-127, mouse para baixo).
+        for b in [0x28u8, 127, 0x81] {
+            crate::kbd::route_byte(b, true);
+        }
+    }
+    let mut last = None;
+    while let Some(e) = crate::kbd::try_pop_input_event() {
+        last = Some(e);
+    }
+    match last {
+        Some(InputEvent::Mouse { x, y, .. }) if x == w - 1 && y == h - 1 => {}
+        _ => return Err("clamp superior falhou"),
+    }
+    // Teclado nao regrediu: scancode (sem AUX) ainda vira InputEvent::Key.
+    crate::kbd::route_byte(0x1E, false);
+    if crate::kbd::try_pop_input_event()
+        != Some(InputEvent::Key {
+            vk: 0x41,
+            ch: b'a' as u32,
+            down: true,
+        })
+    {
+        return Err("evento de tecla perdido");
+    }
+    while crate::kbd::try_pop_input().is_some() {}
+    // Bytes de teclado e mouse intercalados nao se misturam.
+    crate::kbd::route_byte(0x1E, false);
+    crate::kbd::route_byte(0x09, true);
+    crate::kbd::route_byte(0x9E, false);
+    crate::kbd::route_byte(0, true);
+    crate::kbd::route_byte(0, true);
+    let a = crate::kbd::try_pop_input_event();
+    let b = crate::kbd::try_pop_input_event();
+    let c = crate::kbd::try_pop_input_event();
+    while crate::kbd::try_pop_input().is_some() {}
+    if !matches!(a, Some(InputEvent::Key { down: true, .. }))
+        || !matches!(b, Some(InputEvent::Key { down: false, .. }))
+        || !matches!(
+            c,
+            Some(InputEvent::Mouse {
+                kind: MouseKind::Up(_) | MouseKind::Down(_),
+                ..
+            })
+        )
+    {
+        return Err("fluxos teclado/mouse misturados");
     }
     Ok(())
 }

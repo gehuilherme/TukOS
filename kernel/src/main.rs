@@ -98,6 +98,9 @@ unsafe extern "C" fn kmain() -> ! {
     );
 
     syscall::init();
+    if !kbd::init_mouse() {
+        kprintln!("mouse PS/2 nao respondeu (seguindo sem mouse)");
+    }
     kprintln!("TukOS pronto");
 
     #[cfg(feature = "ktest")]
