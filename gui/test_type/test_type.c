@@ -25,8 +25,11 @@ static LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
         EndPaint(h, &ps);
         return 0;
     }
+    case WM_KEYDOWN:
+        if (w == VK_ESCAPE) PostQuitMessage(0);
+        return 0;
     case WM_CHAR: {
-        if (w == '\r' || w == 0x1B) {
+        if (w == '\r') {
             PostQuitMessage(0);
         } else if (w == 0x08) {
             if (g_n > 0) {
