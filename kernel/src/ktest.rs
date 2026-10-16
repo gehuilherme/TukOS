@@ -1833,7 +1833,7 @@ fn mouse_events() -> Result<(), &'static str> {
     let (w, h) = crate::fbcon::fb_info()
         .map(|(w, h, _)| (w as i32, h as i32))
         .ok_or("sem framebuffer")?;
-    // Ancora: arrasta ao canto (0,0) (dx=-255 e dy=+255 repetidos, clamp).
+    // Ancora: arrasta ao canto (0,0) (dx=-128 e dy=+127 repetidos, clamp).
     for _ in 0..(w.max(h) / 255 + 2) {
         // byte0: bit3 + X sign (0x10); dx=-255 nao cabe: usa -128 (0x80) e dy=+127.
         for b in [0x18u8, 0x80, 0x7F] {

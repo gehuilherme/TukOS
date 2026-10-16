@@ -320,8 +320,8 @@ impl MouseState {
     pub fn apply(&mut self, p: MousePacket, w: i32, h: i32) -> [Option<InputEvent>; 4] {
         let mut out = [None; 4];
         let mut n = 0;
-        self.x = (self.x + p.dx as i32).clamp(0, (w - 1).max(0));
-        self.y = (self.y - p.dy as i32).clamp(0, (h - 1).max(0));
+        self.x = self.x.saturating_add(p.dx as i32).clamp(0, (w - 1).max(0));
+        self.y = self.y.saturating_sub(p.dy as i32).clamp(0, (h - 1).max(0));
         let new = p.left as u8 | (p.right as u8) << 1 | (p.middle as u8) << 2;
         let old = self.buttons;
         self.buttons = new;
