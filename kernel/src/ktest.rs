@@ -1659,7 +1659,7 @@ fn key_event_queue() -> Result<(), &'static str> {
         return Err("anel de console nao recebeu os caracteres");
     }
     // Limitada: injetar muito alem da capacidade descarta os mais antigos.
-    for _ in 0..(kbd::EventRing::CAP * 4) {
+    for _ in 0..(kbd::InputRing::CAP * 4) {
         crate::kbd::push_scancode_byte(0x1E);
         crate::kbd::push_scancode_byte(0x9E);
     }
@@ -1668,7 +1668,7 @@ fn key_event_queue() -> Result<(), &'static str> {
         n += 1;
     }
     while crate::kbd::try_pop_input().is_some() {}
-    if n != kbd::EventRing::CAP {
+    if n != kbd::InputRing::CAP {
         return Err("fila de eventos nao e limitada");
     }
     Ok(())

@@ -90,6 +90,10 @@ unsafe extern "C" fn kmain() -> ! {
     kprintln!("memoria: {} frames livres", mem::frames::free_frame_count());
     sched::init();
     apic::init();
+    // Antes de ligar interrupcoes: o tick (kbd::poll) nao pode roubar o ACK do mouse.
+    if !kbd::init_mouse() {
+        kprintln!("mouse PS/2 nao respondeu (seguindo sem mouse)");
+    }
     arch_x86_64::interrupts::mask_legacy_pic();
     arch_x86_64::interrupts::enable();
     kprintln!(
@@ -98,9 +102,6 @@ unsafe extern "C" fn kmain() -> ! {
     );
 
     syscall::init();
-    if !kbd::init_mouse() {
-        kprintln!("mouse PS/2 nao respondeu (seguindo sem mouse)");
-    }
     kprintln!("TukOS pronto");
 
     #[cfg(feature = "ktest")]

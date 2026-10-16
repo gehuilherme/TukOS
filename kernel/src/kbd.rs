@@ -37,6 +37,7 @@ pub fn push_scancode_byte(sc: u8) {
 /// Retira o proximo evento de TECLA da fila unificada, sem bloquear. Eventos de
 /// mouse que o precedem sao descartados (consumidores do nr 17 so querem teclas).
 pub fn try_pop_key_event() -> Option<KeyEvent> {
+    // Por design: descarta mouse antes da tecla (quem mistura nr17+nr18 perde mouse; nr18 e o caminho unificado).
     INPUT_EVENTS.lock().pop_key()
 }
 
@@ -77,13 +78,31 @@ pub fn try_pop_input() -> Option<u8> {
 /// Drena o i8042 (chamado a cada tick do timer).
 pub fn poll() {
     for _ in 0..MAX_PER_TICK {
-        let status = unsafe { inb(STATUS_PORT) };
-        if status & STATUS_OUT_FULL == 0 {
+        // STATUS + DATA formam um par atomico em relacao ao tick (que tambem
+        // chama poll): sem isso, o tick consome o byte entre as duas leituras
+        // e o byte seguinte seria roteado com o bit AUX errado.
+        let Some((byte, aux)) = without_interrupts(|| {
+            let status = unsafe { inb(STATUS_PORT) };
+            if status & STATUS_OUT_FULL == 0 {
+                return None;
+            }
+            Some((unsafe { inb(DATA_PORT) }, status & STATUS_AUX != 0))
+        }) else {
             break;
-        }
-        let byte = unsafe { inb(DATA_PORT) };
-        route_byte(byte, status & STATUS_AUX != 0);
+        };
+        route_byte(byte, aux);
     }
+}
+
+/// Executa `f` com interrupcoes desligadas, restaurando o estado anterior de IF.
+fn without_interrupts<R>(f: impl FnOnce() -> R) -> R {
+    let was = arch_x86_64::interrupts::are_enabled();
+    arch_x86_64::interrupts::disable();
+    let r = f();
+    if was {
+        arch_x86_64::interrupts::enable();
+    }
+    r
 }
 
 const STATUS_IN_FULL: u8 = 1 << 1;
@@ -107,11 +126,16 @@ fn wait_input_empty() -> bool {
 /// bytes de teclado nesse meio tempo vao ao teclado. Devolve o byte do mouse.
 fn read_aux_byte() -> Option<u8> {
     for _ in 0..WAIT_SPINS {
-        let status = unsafe { inb(STATUS_PORT) };
+        let (status, b) = without_interrupts(|| {
+            let status = unsafe { inb(STATUS_PORT) };
+            if status & STATUS_OUT_FULL == 0 {
+                return (status, 0);
+            }
+            (status, unsafe { inb(DATA_PORT) })
+        });
         if status & STATUS_OUT_FULL == 0 {
             continue;
         }
-        let b = unsafe { inb(DATA_PORT) };
         if status & STATUS_AUX != 0 {
             return Some(b);
         }
@@ -124,6 +148,10 @@ fn read_aux_byte() -> Option<u8> {
 /// Usamos polling (sem IRQ12), entao os bits de interrupcao do controlador
 /// ficam como estao. Esperas limitadas: sem mouse, retorna false sem travar.
 pub fn init_mouse() -> bool {
+    without_interrupts(init_mouse_inner)
+}
+
+fn init_mouse_inner() -> bool {
     if !wait_input_empty() {
         return false;
     }
@@ -139,7 +167,17 @@ pub fn init_mouse() -> bool {
     // ACK 0xFA do mouse; qualquer outro byte de mouse e ignorado.
     for _ in 0..4 {
         match read_aux_byte() {
-            Some(MOUSE_ACK) => return true,
+            Some(MOUSE_ACK) => {
+                // Nenhum byte residual (ACK/stale) pode semear o primeiro pacote.
+                for _ in 0..16 {
+                    if unsafe { inb(STATUS_PORT) } & STATUS_OUT_FULL == 0 {
+                        break;
+                    }
+                    unsafe { inb(DATA_PORT) };
+                }
+                *MOUSE_DEC.lock() = MouseDecoder::new();
+                return true;
+            }
             Some(_) => {}
             None => return false,
         }
