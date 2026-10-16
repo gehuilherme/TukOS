@@ -36,7 +36,7 @@ static CONFORMANCE_EXE: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/crt_he
 ))]
 static CONFORMANCE_EXE: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/hello_win.exe"));
 /// With `gui_type` (implies `gui`) the program is the interactive typing window test_type.exe.
-#[cfg(feature = "gui_type")]
+#[cfg(all(feature = "gui_type", not(feature = "gui_desk")))]
 static CONFORMANCE_EXE: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/test_type.exe"));
 /// With `gui_paint` (implies `gui`) the program is the mouse paint demo paint_win.exe.
 #[cfg(all(

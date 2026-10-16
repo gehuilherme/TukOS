@@ -628,7 +628,10 @@ fn gui_two_windows() -> Result<(), &'static str> {
     // Phase 0: wait for both windows to paint with B on top.
     // A-only (80,120); B-only (380,250); overlap (240,160); desktop (20,20).
     let mut stage = 0;
-    for _ in 0..80000 {
+    // Bounded wait: a blocked GetMessage costs ~40ms per yield, so ~WAIT_CAP yields stays
+    // well under the 60s xtask timeout and a regression reports FAIL with diagnostics.
+    const WAIT_CAP: u32 = 400;
+    for it in 0..WAIT_CAP {
         crate::sched::yield_now();
         let st = crate::syscall::LAST_TERMINATE_STATUS.load(Ordering::SeqCst);
         if st != u64::MAX {
@@ -664,13 +667,17 @@ fn gui_two_windows() -> Result<(), &'static str> {
             stage = 1;
         } else if stage == 1 && px(240, 160) == Some(CA) {
             // A raised: still intact elsewhere, B's exposed part unchanged.
-            if px(380, 250) != Some(CB) || px(80, 120) != Some(CA) {
+            // Cursor avoidance: the cursor now sits at (80,120); sample elsewhere.
+            if px(380, 250) != Some(CB) || px(150, 190) != Some(CA) {
                 return Err("gui_two_windows: apos o clique, areas exclusivas mudaram");
             }
             // ESC (make/break) reaches the focused window (A) and ends the demo.
             crate::kbd::route_byte(0x01, false);
             crate::kbd::route_byte(0x81, false);
             stage = 2;
+        }
+        if it % 100 == 99 {
+            crate::kprintln!("gui_two_windows: it={} stage={}", it, stage);
         }
     }
     crate::kprintln!(
@@ -680,7 +687,11 @@ fn gui_two_windows() -> Result<(), &'static str> {
         px(380, 250),
         px(240, 160)
     );
-    Err("gui_two_windows nao terminou/recolheu os frames")
+    Err(match stage {
+        0 => "gui_two_windows: timeout esperando as 2 janelas pintadas (A/B/sobreposicao)",
+        1 => "gui_two_windows: timeout apos o clique (A nao foi levantada na sobreposicao)",
+        _ => "gui_two_windows: timeout esperando o demo sair/recolher frames",
+    })
 }
 
 /// The GUI demo (target/conformance/gui/hello_win.exe; empty if not built).
