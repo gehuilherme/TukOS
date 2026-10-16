@@ -14,7 +14,41 @@ pub struct FbCon {
     pitch: usize,
     col: usize,
     row: usize,
+    cursor_enabled: bool,
+    cursor_shown: bool,
+    cursor_x: usize,
+    cursor_y: usize,
+    save_under: [u32; CUR_W * CUR_H],
 }
+
+const CUR_W: usize = 12;
+const CUR_H: usize = 19;
+const CUR_BLACK: u32 = 0x0000_0000;
+const CUR_WHITE: u32 = 0x00FF_FFFF;
+
+/// Seta propria (clean-room): 'X' contorno preto, 'W' miolo branco, '.' transparente.
+/// O ponto ativo e o canto superior esquerdo.
+const CURSOR_SPRITE: [&[u8; CUR_W]; CUR_H] = [
+    b"X...........",
+    b"XX..........",
+    b"XWX.........",
+    b"XWWX........",
+    b"XWWWX.......",
+    b"XWWWWX......",
+    b"XWWWWWX.....",
+    b"XWWWWWWX....",
+    b"XWWWWWWWX...",
+    b"XWWWWWWWWX..",
+    b"XWWWWWWWWWX.",
+    b"XWWWWWXXXXXX",
+    b"XWWXWWX.....",
+    b"XWX.XWWX....",
+    b"XX..XWWX....",
+    b"X....XWWX...",
+    b".....XWWX...",
+    b"......XX....",
+    b"............",
+];
 
 // The framebuffer is only touched through the mutex below.
 unsafe impl Send for FbCon {}
@@ -56,6 +90,12 @@ impl FbCon {
 
     /// Fills a rectangle, clamped to the framebuffer (no overflow, no OOB writes).
     pub fn fill_rect(&mut self, x: u32, y: u32, w: u32, h: u32, color: u32) {
+        self.cursor_hide_for_draw();
+        self.fill_rect_inner(x, y, w, h, color);
+        self.cursor_show_after_draw();
+    }
+
+    fn fill_rect_inner(&mut self, x: u32, y: u32, w: u32, h: u32, color: u32) {
         let Some((x, y, x1, y1)) =
             gfx::clamp_rect(x, y, w, h, self.width as u32, self.height as u32)
         else {
@@ -71,6 +111,12 @@ impl FbCon {
     /// Draws ASCII `bytes` at pixel (x, y), blending `bg` to `fg` by glyph
     /// intensity; every pixel is clamped to the framebuffer.
     pub fn text_out(&mut self, x: u32, y: u32, bytes: &[u8], fg: u32, bg: u32) {
+        self.cursor_hide_for_draw();
+        self.text_out_inner(x, y, bytes, fg, bg);
+        self.cursor_show_after_draw();
+    }
+
+    fn text_out_inner(&mut self, x: u32, y: u32, bytes: &[u8], fg: u32, bg: u32) {
         let (cw, ch) = (Self::cell_width(), Self::cell_height());
         for (i, &b) in bytes.iter().enumerate() {
             let c = if (0x20..0x7F).contains(&b) {
@@ -102,9 +148,74 @@ impl FbCon {
     }
 
     pub fn clear(&mut self) {
+        self.cursor_hide_for_draw();
         unsafe { core::ptr::write_bytes(self.base, 0, self.pitch * self.height) };
         self.col = 0;
         self.row = 0;
+        self.cursor_show_after_draw();
+    }
+
+    // --- Camada de cursor (todos assumem o lock do FBCON ja tomado) ---
+
+    fn cursor_hide_for_draw(&mut self) {
+        if self.cursor_shown {
+            self.cursor_restore();
+        }
+    }
+
+    fn cursor_show_after_draw(&mut self) {
+        if self.cursor_enabled {
+            self.cursor_save_and_draw();
+        }
+    }
+
+    /// Sub-retangulo visivel do sprite na posicao atual: (x0, y0, x1, y1) absolutos.
+    fn cursor_visible(&self) -> Option<(usize, usize, usize, usize)> {
+        let (cx, cy) = (
+            u32::try_from(self.cursor_x).ok()?,
+            u32::try_from(self.cursor_y).ok()?,
+        );
+        let (x0, y0, x1, y1) = gfx::clamp_rect(
+            cx,
+            cy,
+            CUR_W as u32,
+            CUR_H as u32,
+            self.width as u32,
+            self.height as u32,
+        )?;
+        Some((x0, y0, x1, y1))
+    }
+
+    fn cursor_save_and_draw(&mut self) {
+        if let Some((x0, y0, x1, y1)) = self.cursor_visible() {
+            for y in y0..y1 {
+                for x in x0..x1 {
+                    let (sx, sy) = (x - self.cursor_x, y - self.cursor_y);
+                    self.save_under[sy * CUR_W + sx] = self.pixel(x, y);
+                    match CURSOR_SPRITE[sy][sx] {
+                        b'X' => self.put_raw(x, y, CUR_BLACK),
+                        b'W' => self.put_raw(x, y, CUR_WHITE),
+                        _ => {}
+                    }
+                }
+            }
+        }
+        self.cursor_shown = true;
+    }
+
+    fn cursor_restore(&mut self) {
+        if let Some((x0, y0, x1, y1)) = self.cursor_visible() {
+            for y in y0..y1 {
+                for x in x0..x1 {
+                    let (sx, sy) = (x - self.cursor_x, y - self.cursor_y);
+                    if CURSOR_SPRITE[sy][sx] != b'.' {
+                        let v = self.save_under[sy * CUR_W + sx];
+                        self.put_raw(x, y, v);
+                    }
+                }
+            }
+        }
+        self.cursor_shown = false;
     }
 
     fn draw_char(&mut self, c: char) {
@@ -141,6 +252,12 @@ impl FbCon {
     }
 
     pub fn write_str(&mut self, s: &str) {
+        self.cursor_hide_for_draw();
+        self.write_str_inner(s);
+        self.cursor_show_after_draw();
+    }
+
+    fn write_str_inner(&mut self, s: &str) {
         for c in s.chars() {
             match c {
                 '\n' => self.newline(),
@@ -196,6 +313,45 @@ pub fn text_out(x: u32, y: u32, bytes: &[u8], fg: u32, bg: u32) {
     }
 }
 
+/// Liga a camada de cursor (nao desenha ate `cursor_show_at`/`cursor_move_to`).
+#[allow(dead_code)]
+pub fn cursor_enable() {
+    if let Some(con) = FBCON.lock().as_mut() {
+        con.cursor_enabled = true;
+    }
+}
+
+#[allow(dead_code)]
+pub fn cursor_disable() {
+    if let Some(con) = FBCON.lock().as_mut() {
+        con.cursor_hide_for_draw();
+        con.cursor_enabled = false;
+    }
+}
+
+#[allow(dead_code)]
+pub fn cursor_show_at(x: u32, y: u32) {
+    if let Some(con) = FBCON.lock().as_mut() {
+        con.cursor_hide_for_draw();
+        con.cursor_x = x as usize;
+        con.cursor_y = y as usize;
+        con.cursor_save_and_draw();
+    }
+}
+
+#[allow(dead_code)]
+pub fn cursor_hide() {
+    if let Some(con) = FBCON.lock().as_mut() {
+        con.cursor_hide_for_draw();
+    }
+}
+
+/// Esconde no ponto antigo, move e mostra no novo, sob um unico lock.
+#[allow(dead_code)]
+pub fn cursor_move_to(x: u32, y: u32) {
+    cursor_show_at(x, y);
+}
+
 /// Bounds-checked pixel read (0x00RRGGBB), `None` outside the framebuffer.
 #[cfg_attr(not(feature = "ktest"), allow(dead_code))]
 pub fn pixel(x: u32, y: u32) -> Option<u32> {
@@ -222,6 +378,11 @@ pub fn init_from_limine() {
         pitch: fb.pitch() as usize,
         col: 0,
         row: 0,
+        cursor_enabled: false,
+        cursor_shown: false,
+        cursor_x: 0,
+        cursor_y: 0,
+        save_under: [0; CUR_W * CUR_H],
     };
     con.clear();
     *FBCON.lock() = Some(con);

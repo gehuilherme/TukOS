@@ -136,6 +136,7 @@ const TESTS: &[(&str, TestFn)] = &[
     ("program_reads_file", program_reads_file),
     ("program_spawns_child", program_spawns_child),
     ("echo_reads_and_prints", echo_reads_and_prints),
+    ("cursor_save_under", cursor_save_under),
     ("window_paints", window_paints),
     ("gui_hello_window", gui_hello_window),
     ("window_keyboard_echo", window_keyboard_echo),
@@ -1722,6 +1723,63 @@ fn fb_fill_and_read() -> Result<(), &'static str> {
     if pixel(40, 40) == Some(a) {
         return Err("texto nao desenhado");
     }
+    if let Some(con) = crate::fbcon::FBCON.lock().as_mut() {
+        con.clear();
+    }
+    Ok(())
+}
+
+fn cursor_save_under() -> Result<(), &'static str> {
+    use crate::fbcon::{
+        cursor_disable, cursor_enable, cursor_hide, cursor_move_to, cursor_show_at, fb_info,
+        fill_rect, pixel,
+    };
+    let (w, h, _) = fb_info().ok_or("sem framebuffer")?;
+    let (a, b) = (0x0011_2233, 0x00FF_0000);
+    let white = 0x00FF_FFFF;
+    fill_rect(0, 0, w, h, a);
+    cursor_enable();
+    cursor_show_at(100, 100);
+    // (101,102) e interior branco da seta; (112,100) e (100,119) fora da caixa 12x19.
+    if pixel(101, 102) != Some(white) {
+        return Err("sprite nao desenhado");
+    }
+    if pixel(112, 100) != Some(a) || pixel(100, 119) != Some(a) || pixel(99, 100) != Some(a) {
+        return Err("sprite vazou da caixa");
+    }
+    cursor_hide();
+    if pixel(100, 100) != Some(a) || pixel(101, 102) != Some(a) {
+        return Err("fundo nao restaurado apos hide");
+    }
+    // Topmost: o app pinta sob o cursor; sprite continua por cima, B preservado.
+    cursor_show_at(100, 100);
+    fill_rect(90, 90, 40, 40, b);
+    if pixel(101, 102) != Some(white) {
+        return Err("sprite nao ficou por cima apos fill_rect");
+    }
+    if pixel(95, 95) != Some(b) || pixel(125, 125) != Some(b) {
+        return Err("fill_rect sob o cursor nao aplicado");
+    }
+    cursor_hide();
+    if pixel(101, 102) != Some(b) || pixel(100, 100) != Some(b) {
+        return Err("conteudo sob o cursor nao preservado");
+    }
+    // Move: sprite no novo lugar, antigo restaurado (sem rastro).
+    cursor_show_at(100, 100);
+    cursor_move_to(300, 200);
+    if pixel(301, 202) != Some(white) {
+        return Err("sprite ausente no novo ponto");
+    }
+    if pixel(101, 102) != Some(b) || pixel(100, 100) != Some(b) {
+        return Err("rastro no ponto antigo");
+    }
+    // Borda: cursor no canto inferior direito, so a parte visivel e desenhada.
+    cursor_move_to(w - 3, h - 3);
+    if pixel(w - 1, h - 1) == Some(a) && pixel(w - 3, h - 3) == Some(a) {
+        return Err("sprite nao desenhado na borda");
+    }
+    cursor_move_to(w + 50, h + 50);
+    cursor_disable();
     if let Some(con) = crate::fbcon::FBCON.lock().as_mut() {
         con.clear();
     }
