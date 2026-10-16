@@ -139,6 +139,7 @@ const TESTS: &[(&str, TestFn)] = &[
     ("window_paints", window_paints),
     ("gui_hello_window", gui_hello_window),
     ("window_keyboard_echo", window_keyboard_echo),
+    ("window_mouse_click", window_mouse_click),
     ("shell_runs_command", shell_runs_command),
     ("shell_unknown_and_help", shell_unknown_and_help),
     ("shell_echo_args", shell_echo_args),
@@ -648,6 +649,72 @@ fn window_keyboard_echo() -> Result<(), &'static str> {
         }
     }
     Err("window_keyboard_echo nao terminou/recolheu os frames")
+}
+
+/// The mouse GUI test program (target/conformance/gui/test_click.exe; empty if not built).
+static TEST_CLICK_EXE: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/test_click.exe"));
+
+/// Mouse GUI end to end: PS/2 packets (aux bytes) clamp the cursor to (0,0), move it to
+/// (100,80) and press the left button; ESC follows. test_click.exe's blocking GetMessage
+/// turns the mouse events into WM_MOUSEMOVE/WM_LBUTTONDOWN (lParam = packed x,y) and its
+/// WndProc fills an 8x8 red square at the click. We read the square back from the
+/// framebuffer and check the process was reaped.
+fn window_mouse_click() -> Result<(), &'static str> {
+    use core::sync::atomic::Ordering;
+    if !crate::process::have_gui_dlls() || TEST_CLICK_EXE.is_empty() {
+        return Ok(()); // DLLs/test_click.exe not embedded on this host: skip.
+    }
+    while crate::kbd::try_pop_input_event().is_some() {}
+    if let Some(con) = crate::fbcon::FBCON.lock().as_mut() {
+        con.clear();
+    }
+    // 6 saturated packets (dx=-255 overflow, dy=+255 overflow): clamp to (0,0).
+    for _ in 0..6 {
+        for b in [0xD8, 0, 0] {
+            crate::kbd::route_byte(b, true);
+        }
+    }
+    // Move: dx=+100, dy=-80 (down 80) -> (100,80); then left button down there.
+    for b in [0x28, 100, (-80i8) as u8, 0x09, 0, 0] {
+        crate::kbd::route_byte(b, true);
+    }
+    // ESC make/break (scancode set 1) ends the program.
+    crate::kbd::route_byte(0x01, false);
+    crate::kbd::route_byte(0x81, false);
+    crate::syscall::LAST_TERMINATE_STATUS.store(u64::MAX, Ordering::SeqCst);
+    let before = crate::mem::frames::free_frame_count();
+    crate::process::spawn_exe_image_with_gui(TEST_CLICK_EXE.to_vec(), None)
+        .map_err(|_| "window_mouse_click: spawn falhou")?;
+    for _ in 0..40000 {
+        crate::sched::yield_now();
+        let st = crate::syscall::LAST_TERMINATE_STATUS.load(Ordering::SeqCst);
+        if st != u64::MAX {
+            if (0xC000_7001..=0xC000_700A).contains(&st) {
+                crate::kprintln!("window_mouse_click: loader status {:#x}", st);
+                return Err("window_mouse_click: o loader morreu (import nao resolvido?)");
+            }
+            if st != 0 {
+                crate::kprintln!("window_mouse_click terminou com status {:#x}", st);
+                return Err("window_mouse_click: exit code != 0");
+            }
+            if crate::fbcon::pixel(300, 150) != Some(0x0020_2030) {
+                return Err("window_mouse_click: fundo nao foi pintado");
+            }
+            if crate::fbcon::pixel(102, 82) != Some(0x00FF_0000) {
+                return Err("window_mouse_click: quadrado vermelho ausente em (100,80)");
+            }
+            if crate::fbcon::pixel(60, 40) == Some(0x00FF_0000) {
+                return Err("window_mouse_click: pixel longe do clique tambem vermelho");
+            }
+            if crate::mem::frames::free_frame_count() == before {
+                if let Some(con) = crate::fbcon::FBCON.lock().as_mut() {
+                    con.clear();
+                }
+                return Ok(());
+            }
+        }
+    }
+    Err("window_mouse_click nao terminou/recolheu os frames")
 }
 
 /// The `/MT` argv.exe (target/conformance/crt/argv.exe; empty if not built).

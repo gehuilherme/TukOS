@@ -17,8 +17,10 @@
 //! where an empty queue meant `WM_QUIT`). Priority order: (1) `PostQuitMessage` was
 //! called -> `WM_QUIT` (returns 0); (2) a `WM_CHAR` produced by `TranslateMessage` is
 //! pending; (3) a queued `WM_PAINT` (`ShowWindow`/`UpdateWindow`); (4) otherwise it
-//! calls `NtUserGetKeyEvent`, which blocks inside the kernel until a key event exists
-//! (no user-mode spinning). A key-DOWN becomes `WM_KEYDOWN` (wParam = virtual key) and
+//! calls `NtUserGetInputEvent`, which blocks inside the kernel until an input event (key
+//! or mouse) exists (no user-mode spinning). A mouse event becomes `WM_MOUSEMOVE` /
+//! `WM_xBUTTONDOWN` / `WM_xBUTTONUP` with `lParam = (y << 16) | (x & 0xFFFF)` (client =
+//! screen coordinates) and `wParam` = the `MK_*` flags of the buttons held. A key-DOWN becomes `WM_KEYDOWN` (wParam = virtual key) and
 //! its character is remembered for `TranslateMessage`. Key-UP events are SKIPPED (no
 //! `WM_KEYUP` is delivered): a text app only needs `WM_CHAR` from key-downs.
 #![no_std]
@@ -76,9 +78,11 @@ unsafe extern "system" {
     fn NtGdiGetFbInfo(out: *mut u32) -> i32;
     // NtGdiFillRect(x, y, w, h, color): paints a 0x00RRGGBB rectangle (syscall 15).
     fn NtGdiFillRect(x: u32, y: u32, w: u32, h: u32, color: u32) -> i32;
-    // NtUserGetKeyEvent(out): BLOCKS in the kernel until a key event, then writes
-    // [vk:u32, ch:u32, flags:u32 (bit0 = key down)] (syscall 17).
-    fn NtUserGetKeyEvent(out: *mut u32) -> i32;
+    // NtUserGetInputEvent(out): BLOCKS in the kernel until an input event, then writes
+    // 5 x u32 (syscall 18): key   = [0, vk, ch, down, 0];
+    //                       mouse = [1, x, y, buttons (bit0 L, bit1 R, bit2 M), kind]
+    // with kind 0 Move, 1/2 left down/up, 3/4 right down/up, 5/6 middle down/up.
+    fn NtUserGetInputEvent(out: *mut u32) -> i32;
 }
 
 pub type HWND = isize;
@@ -105,6 +109,18 @@ const WM_PAINT: u32 = 0x000F;
 const WM_QUIT: u32 = 0x0012;
 const WM_KEYDOWN: u32 = 0x0100;
 const WM_CHAR: u32 = 0x0102;
+const WM_MOUSEMOVE: u32 = 0x0200;
+const WM_LBUTTONDOWN: u32 = 0x0201;
+const WM_LBUTTONUP: u32 = 0x0202;
+const WM_RBUTTONDOWN: u32 = 0x0204;
+const WM_RBUTTONUP: u32 = 0x0205;
+const WM_MBUTTONDOWN: u32 = 0x0207;
+const WM_MBUTTONUP: u32 = 0x0208;
+
+// wParam key-state flags of the mouse messages (winuser.h).
+const MK_LBUTTON: usize = 0x0001;
+const MK_RBUTTON: usize = 0x0002;
+const MK_MBUTTON: usize = 0x0010;
 
 // Opaque handle sentinels (non-null, process-unique).
 const THE_HWND: HWND = 0x00AB_0001;
@@ -417,8 +433,8 @@ fn next_message() -> Queued {
         return p;
     }
     loop {
-        let mut ev = [0u32; 3];
-        if unsafe { NtUserGetKeyEvent(ev.as_mut_ptr()) } < 0 {
+        let mut ev = [0u32; 5];
+        if unsafe { NtUserGetInputEvent(ev.as_mut_ptr()) } < 0 {
             // Cannot wait for input: end the loop rather than spin.
             return Queued {
                 message: WM_QUIT,
@@ -426,15 +442,43 @@ fn next_message() -> Queued {
                 lparam: 0,
             };
         }
-        if ev[2] & 1 == 0 {
-            continue; // key-up: skipped (documented choice)
+        if ev[0] == 1 {
+            let message = match ev[4] {
+                0 => WM_MOUSEMOVE,
+                1 => WM_LBUTTONDOWN,
+                2 => WM_LBUTTONUP,
+                3 => WM_RBUTTONDOWN,
+                4 => WM_RBUTTONUP,
+                5 => WM_MBUTTONDOWN,
+                6 => WM_MBUTTONUP,
+                _ => continue,
+            };
+            let b = ev[3];
+            let mut mk = 0;
+            if b & 1 != 0 {
+                mk |= MK_LBUTTON;
+            }
+            if b & 2 != 0 {
+                mk |= MK_RBUTTON;
+            }
+            if b & 4 != 0 {
+                mk |= MK_MBUTTON;
+            }
+            return Queued {
+                message,
+                wparam: mk,
+                lparam: ((((ev[2] & 0xFFFF) << 16) | (ev[1] & 0xFFFF)) as i32) as isize,
+            };
+        }
+        if ev[0] != 0 || ev[3] & 1 == 0 {
+            continue; // key-up (documented choice) or unknown tag: skipped
         }
         let s = state();
-        s.last_vk = ev[0];
-        s.last_ch = ev[1];
+        s.last_vk = ev[1];
+        s.last_ch = ev[2];
         return Queued {
             message: WM_KEYDOWN,
-            wparam: ev[0] as usize,
+            wparam: ev[1] as usize,
             lparam: 0,
         };
     }

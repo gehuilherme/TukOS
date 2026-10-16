@@ -140,7 +140,7 @@ pub fn build_gui_test(root: &Path) -> crate::Result<()> {
     };
     let outdir = root.join("target").join("conformance").join("gui");
     std::fs::create_dir_all(&outdir).map_err(|e| e.to_string())?;
-    for name in ["test_win", "hello_win", "test_type"] {
+    for name in ["test_win", "hello_win", "test_type", "test_click"] {
         let src = root.join("gui").join(name).join(format!("{name}.c"));
         let bat = outdir.join(format!("build-{name}.bat"));
         let script = format!(
