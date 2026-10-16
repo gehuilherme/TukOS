@@ -142,6 +142,7 @@ const TESTS: &[(&str, TestFn)] = &[
     ("wm_compose_fullscreen", wm_compose_fullscreen),
     ("wm_extreme_coords_no_panic", wm_extreme_coords_no_panic),
     ("wm_two_windows_focus", wm_two_windows_focus),
+    ("wm_focus_follows_create", wm_focus_follows_create),
     ("window_positioned_paints", window_positioned_paints),
     ("window_paints", window_paints),
     ("gui_hello_window", gui_hello_window),
@@ -2158,6 +2159,43 @@ fn wm_two_windows_focus() -> Result<(), &'static str> {
         _ => bail!("wm_two_windows_focus: move sobre B nao roteou para B"),
     }
     cleanup();
+    Ok(())
+}
+
+/// Focus uniqueness at creation (regression): creating a SECOND window with no click
+/// between/after must leave the NEWEST window as the sole focused one, so keystrokes go to
+/// it immediately. Before the fix, `create_window` set `focused` on every new window
+/// without clearing the previous, leaving two focused windows and routing keys to the older
+/// one (first in vec order) until a click forced `raise_and_focus`.
+fn wm_focus_follows_create() -> Result<(), &'static str> {
+    use kbd::InputEvent;
+    if let Some(con) = crate::fbcon::FBCON.lock().as_mut() {
+        con.clear();
+    }
+    let a = crate::wm::create_window(WM_OWNER_A, 100, 100, 200, 200, 0)
+        .ok_or("wm_focus_follows_create: create A falhou")?;
+    let b = crate::wm::create_window(WM_OWNER_B, 150, 150, 200, 200, 0)
+        .ok_or("wm_focus_follows_create: create B falhou")?;
+    // NO click: a key must route to the newest window (B), which is the sole focused one.
+    let key = InputEvent::Key {
+        vk: 0x41,
+        ch: b'a' as u32,
+        down: true,
+    };
+    let routed = crate::wm::route_input(key);
+    let focused = crate::wm::focused_count();
+    crate::wm::destroy_window(a);
+    crate::wm::destroy_window(b);
+    if let Some(con) = crate::fbcon::FBCON.lock().as_mut() {
+        con.clear();
+    }
+    match routed {
+        Some((r, _)) if r.hwnd == b && r.owner == WM_OWNER_B => {}
+        _ => return Err("wm_focus_follows_create: tecla nao foi para a janela mais nova (B)"),
+    }
+    if focused != 1 {
+        return Err("wm_focus_follows_create: deveria haver exatamente uma janela focada");
+    }
     Ok(())
 }
 

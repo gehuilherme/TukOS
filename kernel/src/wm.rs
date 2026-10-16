@@ -81,6 +81,15 @@ impl WmState {
     fn find(&self, id: u32) -> Option<usize> {
         self.windows.iter().position(|w| w.id == id)
     }
+
+    /// Makes window index `i` the SOLE focused window (clears `focused` on every other).
+    /// Single source of truth for the "exactly one focused window" invariant, shared by
+    /// `create_window` (newest window is focused) and `raise_and_focus` (click focuses).
+    fn focus_only(&mut self, i: usize) {
+        for (j, w) in self.windows.iter_mut().enumerate() {
+            w.focused = j == i;
+        }
+    }
 }
 
 /// Creates a window owned by `owner`. Returns its id, or `None` if the cap is hit or
@@ -124,6 +133,11 @@ pub fn create_window(owner: usize, x: i32, y: i32, w: u32, h: u32, style: u32) -
         fullscreen,
         backbuffer: alloc::vec![0u32; len],
     });
+    // The newest window becomes the SOLE focused one (matches Windows), so keystrokes go
+    // to it even before any click. Without this, two creates leave two focused windows and
+    // the key router picks the older one by vec order.
+    let last = st.windows.len() - 1;
+    st.focus_only(last);
     Some(id)
 }
 
@@ -249,6 +263,13 @@ pub fn hit_test(x: i32, y: i32) -> Option<u32> {
         .map(|w| w.id)
 }
 
+/// Number of windows currently flagged `focused` (ktest only: checks the "exactly one
+/// focused window" invariant).
+#[cfg(feature = "ktest")]
+pub fn focused_count() -> usize {
+    WM.lock().windows.iter().filter(|w| w.focused).count()
+}
+
 /// Raises window `id` to the top of the z-order and gives it focus. (Task 3.)
 #[allow(dead_code)]
 pub fn raise_and_focus(id: u32) {
@@ -257,9 +278,7 @@ pub fn raise_and_focus(id: u32) {
         let z = st.next_z;
         st.next_z = st.next_z.wrapping_add(1);
         st.windows[i].z = z;
-        for (j, w) in st.windows.iter_mut().enumerate() {
-            w.focused = j == i;
-        }
+        st.focus_only(i);
     }
 }
 
