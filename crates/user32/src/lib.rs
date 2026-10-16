@@ -11,8 +11,16 @@
 //! SINGLE-WINDOW / SINGLE-THREAD MODEL: a TukOS process has exactly one user thread,
 //! so all window state lives in process-global statics with no locking (the existing
 //! kernel32/ntdll make the same assumption). One window class, one window, one message
-//! queue. `GetMessageA` never blocks: `ShowWindow`/`UpdateWindow` seed a `WM_PAINT`
-//! and the WndProc ends the loop with `PostQuitMessage` (→ `WM_QUIT`).
+//! queue.
+//!
+//! `GetMessageA` is BLOCKING (Plano 22; it replaces Plano 21's non-blocking behaviour,
+//! where an empty queue meant `WM_QUIT`). Priority order: (1) `PostQuitMessage` was
+//! called -> `WM_QUIT` (returns 0); (2) a `WM_CHAR` produced by `TranslateMessage` is
+//! pending; (3) a queued `WM_PAINT` (`ShowWindow`/`UpdateWindow`); (4) otherwise it
+//! calls `NtUserGetKeyEvent`, which blocks inside the kernel until a key event exists
+//! (no user-mode spinning). A key-DOWN becomes `WM_KEYDOWN` (wParam = virtual key) and
+//! its character is remembered for `TranslateMessage`. Key-UP events are SKIPPED (no
+//! `WM_KEYUP` is delivered): a text app only needs `WM_CHAR` from key-downs.
 #![no_std]
 #![allow(non_snake_case)]
 
@@ -68,6 +76,9 @@ unsafe extern "system" {
     fn NtGdiGetFbInfo(out: *mut u32) -> i32;
     // NtGdiFillRect(x, y, w, h, color): paints a 0x00RRGGBB rectangle (syscall 15).
     fn NtGdiFillRect(x: u32, y: u32, w: u32, h: u32, color: u32) -> i32;
+    // NtUserGetKeyEvent(out): BLOCKS in the kernel until a key event, then writes
+    // [vk:u32, ch:u32, flags:u32 (bit0 = key down)] (syscall 17).
+    fn NtUserGetKeyEvent(out: *mut u32) -> i32;
 }
 
 pub type HWND = isize;
@@ -92,6 +103,8 @@ pub type WndProc = extern "system" fn(HWND, UINT, WPARAM, LPARAM) -> LRESULT;
 const WM_DESTROY: u32 = 0x0002;
 const WM_PAINT: u32 = 0x000F;
 const WM_QUIT: u32 = 0x0012;
+const WM_KEYDOWN: u32 = 0x0100;
+const WM_CHAR: u32 = 0x0102;
 
 // Opaque handle sentinels (non-null, process-unique).
 const THE_HWND: HWND = 0x00AB_0001;
@@ -181,6 +194,14 @@ struct State {
     queue: [Queued; QCAP],
     head: usize,
     tail: usize,
+    /// `PostQuitMessage` was called: the next `GetMessageA` reports `WM_QUIT`.
+    quit: bool,
+    quit_code: usize,
+    /// Pending `WM_CHAR` character (0 = none), set by `TranslateMessage`.
+    pending_char: u32,
+    /// Virtual key and character of the last `WM_KEYDOWN` handed out.
+    last_vk: u32,
+    last_ch: u32,
 }
 
 static mut STATE: State = State {
@@ -188,7 +209,16 @@ static mut STATE: State = State {
     queue: [NO_MSG; QCAP],
     head: 0,
     tail: 0,
+    quit: false,
+    quit_code: 0,
+    pending_char: 0,
+    last_vk: 0,
+    last_ch: 0,
 };
+
+fn state() -> &'static mut State {
+    unsafe { &mut *core::ptr::addr_of_mut!(STATE) }
+}
 
 /// Enqueues a message (drops it silently if the tiny queue is full; the deterministic
 /// single-window flow never enqueues more than a couple at a time).
@@ -332,9 +362,9 @@ pub extern "system" fn UpdateWindow(_hwnd: HWND) -> BOOL {
 
 // --- message loop ------------------------------------------------------------------
 
-/// `GetMessageA`: returns the next message. Non-blocking in this model: an empty queue
-/// means the loop is over, so it reports `WM_QUIT`. Returns 0 on `WM_QUIT` (ends the
-/// loop), nonzero otherwise; -1 (error) never happens here.
+/// `GetMessageA`: BLOCKING message pump (see the module header for the priority
+/// order). Returns 0 on `WM_QUIT` (ends the loop), nonzero otherwise; -1 (error) only
+/// for a null `msg`.
 #[unsafe(no_mangle)]
 #[allow(clippy::not_unsafe_ptr_arg_deref)]
 pub extern "system" fn GetMessageA(
@@ -346,11 +376,7 @@ pub extern "system" fn GetMessageA(
     if msg.is_null() {
         return -1;
     }
-    let m = take().unwrap_or(Queued {
-        message: WM_QUIT,
-        wparam: 0,
-        lparam: 0,
-    });
+    let m = next_message();
     unsafe {
         core::ptr::write(
             msg,
@@ -368,10 +394,67 @@ pub extern "system" fn GetMessageA(
     i32::from(m.message != WM_QUIT)
 }
 
-/// `TranslateMessage`: no keyboard translation in this model.
+/// Picks the next message by priority; blocks in the kernel when nothing is ready.
+fn next_message() -> Queued {
+    let s = state();
+    if s.quit {
+        return Queued {
+            message: WM_QUIT,
+            wparam: s.quit_code,
+            lparam: 0,
+        };
+    }
+    if s.pending_char != 0 {
+        let c = s.pending_char;
+        s.pending_char = 0;
+        return Queued {
+            message: WM_CHAR,
+            wparam: c as usize,
+            lparam: 0,
+        };
+    }
+    if let Some(p) = take() {
+        return p;
+    }
+    loop {
+        let mut ev = [0u32; 3];
+        if unsafe { NtUserGetKeyEvent(ev.as_mut_ptr()) } < 0 {
+            // Cannot wait for input: end the loop rather than spin.
+            return Queued {
+                message: WM_QUIT,
+                wparam: 0,
+                lparam: 0,
+            };
+        }
+        if ev[2] & 1 == 0 {
+            continue; // key-up: skipped (documented choice)
+        }
+        let s = state();
+        s.last_vk = ev[0];
+        s.last_ch = ev[1];
+        return Queued {
+            message: WM_KEYDOWN,
+            wparam: ev[0] as usize,
+            lparam: 0,
+        };
+    }
+}
+
+/// `TranslateMessage`: a `WM_KEYDOWN` whose key produced a character enqueues a
+/// `WM_CHAR` for the next `GetMessageA`. Returns TRUE if it did, else FALSE.
 #[unsafe(no_mangle)]
 #[allow(clippy::not_unsafe_ptr_arg_deref)]
-pub extern "system" fn TranslateMessage(_msg: *const MSG) -> BOOL {
+pub extern "system" fn TranslateMessage(msg: *const MSG) -> BOOL {
+    if msg.is_null() {
+        return 0;
+    }
+    let m = unsafe { &*msg };
+    let s = state();
+    if m.message == WM_KEYDOWN && m.wParam == s.last_vk as usize && s.last_ch != 0 {
+        s.pending_char = s.last_ch;
+        s.last_ch = 0;
+        return 1;
+    }
     0
 }
 
@@ -408,7 +491,9 @@ pub extern "system" fn DefWindowProcA(
 /// `PostQuitMessage`: makes the next `GetMessageA` report `WM_QUIT` (which returns 0).
 #[unsafe(no_mangle)]
 pub extern "system" fn PostQuitMessage(exit_code: i32) {
-    post(WM_QUIT, exit_code as usize, 0);
+    let s = state();
+    s.quit = true;
+    s.quit_code = exit_code as usize;
 }
 
 // --- painting ----------------------------------------------------------------------
@@ -440,6 +525,18 @@ pub extern "system" fn BeginPaint(_hwnd: HWND, paint: *mut PAINTSTRUCT) -> HDC {
         }
     }
     SCREEN_HDC
+}
+
+/// `GetDC`: the opaque screen DC (single window, client area = screen).
+#[unsafe(no_mangle)]
+pub extern "system" fn GetDC(_hwnd: HWND) -> HDC {
+    SCREEN_HDC
+}
+
+/// `ReleaseDC`: nothing to release.
+#[unsafe(no_mangle)]
+pub extern "system" fn ReleaseDC(_hwnd: HWND, _hdc: HDC) -> i32 {
+    1
 }
 
 /// `EndPaint`: nothing to release (the screen DC is implicit).

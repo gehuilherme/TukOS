@@ -137,6 +137,7 @@ const TESTS: &[(&str, TestFn)] = &[
     ("echo_reads_and_prints", echo_reads_and_prints),
     ("window_paints", window_paints),
     ("gui_hello_window", gui_hello_window),
+    ("window_keyboard_echo", window_keyboard_echo),
     ("shell_runs_command", shell_runs_command),
     ("shell_unknown_and_help", shell_unknown_and_help),
     ("shell_echo_args", shell_echo_args),
@@ -576,6 +577,76 @@ fn gui_hello_window() -> Result<(), &'static str> {
         }
     }
     Err("gui_hello_window nao terminou/recolheu os frames")
+}
+
+/// The keyboard GUI test program (target/conformance/gui/test_type.exe; empty if not built).
+static TEST_TYPE_EXE: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/test_type.exe"));
+
+/// Keyboard-interactive GUI end to end: scancodes for "Hi" + Enter are injected into the
+/// key-event queue; test_type.exe's blocking GetMessage turns them into WM_KEYDOWN, its
+/// TranslateMessage into WM_CHAR, the WndProc draws each char with TextOut at
+/// x = 20 + 16*n, y = 25 (white on RGB(32,32,48)) and quits on Enter (0x0D). We assert ink in the
+/// boxes of 'H' and 'i', none in the third box, and that the process was reaped.
+fn window_keyboard_echo() -> Result<(), &'static str> {
+    use core::sync::atomic::Ordering;
+    if !crate::process::have_gui_dlls() || TEST_TYPE_EXE.is_empty() {
+        return Ok(()); // DLLs/test_type.exe not embedded on this host: skip.
+    }
+    while crate::kbd::try_pop_key_event().is_some() {}
+    while crate::kbd::try_pop_input().is_some() {}
+    if let Some(con) = crate::fbcon::FBCON.lock().as_mut() {
+        con.clear();
+    }
+    // Shift+H, i, Enter: make AND break codes (scancode set 1).
+    for sc in [0x2A, 0x23, 0xA3, 0xAA, 0x17, 0x97, 0x1C, 0x9C] {
+        crate::kbd::push_scancode_byte(sc);
+    }
+    while crate::kbd::try_pop_input().is_some() {}
+    crate::syscall::LAST_TERMINATE_STATUS.store(u64::MAX, Ordering::SeqCst);
+    let before = crate::mem::frames::free_frame_count();
+    crate::process::spawn_exe_image_with_gui(TEST_TYPE_EXE.to_vec(), None)
+        .map_err(|_| "window_keyboard_echo: spawn falhou")?;
+    // Ink = a white-ish pixel (red channel well above the dark background's 32).
+    let ink_in = |x0: u32| {
+        (25..45).any(|y| {
+            (x0..x0 + 16).any(|x| {
+                crate::fbcon::pixel(x, y).is_some_and(|p| (p >> 16) & 0xFF > HELLO_TEXT_MIN_RED)
+            })
+        })
+    };
+    for _ in 0..40000 {
+        crate::sched::yield_now();
+        let st = crate::syscall::LAST_TERMINATE_STATUS.load(Ordering::SeqCst);
+        if st != u64::MAX {
+            if (0xC000_7001..=0xC000_700A).contains(&st) {
+                crate::kprintln!("window_keyboard_echo: loader status {:#x}", st);
+                return Err("window_keyboard_echo: o loader morreu (import nao resolvido?)");
+            }
+            if st != 0 {
+                crate::kprintln!("window_keyboard_echo terminou com status {:#x}", st);
+                return Err("window_keyboard_echo: exit code != 0");
+            }
+            if crate::fbcon::pixel(300, 150) != Some(0x0020_2030) {
+                return Err("window_keyboard_echo: fundo nao foi pintado");
+            }
+            if !ink_in(20) {
+                return Err("window_keyboard_echo: glifo 'H' ausente");
+            }
+            if !ink_in(36) {
+                return Err("window_keyboard_echo: glifo 'i' ausente");
+            }
+            if ink_in(52) {
+                return Err("window_keyboard_echo: o Enter foi desenhado");
+            }
+            if crate::mem::frames::free_frame_count() == before {
+                if let Some(con) = crate::fbcon::FBCON.lock().as_mut() {
+                    con.clear();
+                }
+                return Ok(());
+            }
+        }
+    }
+    Err("window_keyboard_echo nao terminou/recolheu os frames")
 }
 
 /// The `/MT` argv.exe (target/conformance/crt/argv.exe; empty if not built).
