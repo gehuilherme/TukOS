@@ -144,6 +144,7 @@ const TESTS: &[(&str, TestFn)] = &[
     ("wm_two_windows_focus", wm_two_windows_focus),
     ("wm_focus_follows_create", wm_focus_follows_create),
     ("window_positioned_paints", window_positioned_paints),
+    ("gui_two_windows", gui_two_windows),
     ("window_paints", window_paints),
     ("gui_hello_window", gui_hello_window),
     ("window_keyboard_echo", window_keyboard_echo),
@@ -590,6 +591,96 @@ fn window_positioned_paints() -> Result<(), &'static str> {
         }
     }
     Err("window_positioned_paints nao terminou/recolheu os frames")
+}
+
+/// The two-window desktop demo (target/conformance/gui/desk_demo.exe).
+static DESK_DEMO_EXE: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/desk_demo.exe"));
+
+/// End-to-end window manager: ONE process (desk_demo.exe) creates two overlapping windows
+/// through user32 -> syscalls -> compositor. A = (60,50) 240x160 red; B = (180,120) 240x160
+/// green, created last (focused + on top). Overlap = screen (180..300, 120..210). We check
+/// the stacking by reading the framebuffer, then inject a mouse click on A's exposed area
+/// and check A is raised (A's colour now wins in the overlap), then ESC and reap.
+fn gui_two_windows() -> Result<(), &'static str> {
+    use core::sync::atomic::Ordering;
+    const CA: u32 = 0x00C8_3C3C; // RGB(200,60,60)
+    const CB: u32 = 0x003C_A050; // RGB(60,160,80)
+    const DESKTOP_BG: u32 = 0x0020_3040;
+    if !crate::process::have_gui_dlls() || DESK_DEMO_EXE.is_empty() {
+        return Ok(()); // DLLs/desk_demo.exe not embedded on this host: skip.
+    }
+    while crate::kbd::try_pop_input_event().is_some() {}
+    // Clamp the cursor to (0,0), then drop the resulting events before the demo starts.
+    for _ in 0..6 {
+        for b in [0xD8, 0, 0] {
+            crate::kbd::route_byte(b, true);
+        }
+    }
+    while crate::kbd::try_pop_input_event().is_some() {}
+    if let Some(con) = crate::fbcon::FBCON.lock().as_mut() {
+        con.clear();
+    }
+    crate::syscall::LAST_TERMINATE_STATUS.store(u64::MAX, Ordering::SeqCst);
+    let before = crate::mem::frames::free_frame_count();
+    crate::process::spawn_exe_image_with_gui(DESK_DEMO_EXE.to_vec(), None)
+        .map_err(|_| "gui_two_windows: spawn falhou")?;
+    let px = crate::fbcon::pixel;
+    // Phase 0: wait for both windows to paint with B on top.
+    // A-only (80,120); B-only (380,250); overlap (240,160); desktop (20,20).
+    let mut stage = 0;
+    for _ in 0..80000 {
+        crate::sched::yield_now();
+        let st = crate::syscall::LAST_TERMINATE_STATUS.load(Ordering::SeqCst);
+        if st != u64::MAX {
+            if (0xC000_7001..=0xC000_700A).contains(&st) {
+                crate::kprintln!("gui_two_windows: loader status {:#x}", st);
+                return Err("gui_two_windows: o loader morreu (import nao resolvido?)");
+            }
+            if stage < 2 {
+                return Err("gui_two_windows: o demo saiu antes do esperado");
+            }
+            if st != 0 {
+                return Err("gui_two_windows: exit code != 0");
+            }
+            if crate::mem::frames::free_frame_count() == before {
+                if let Some(con) = crate::fbcon::FBCON.lock().as_mut() {
+                    con.clear();
+                }
+                return Ok(());
+            }
+            continue;
+        }
+        if stage == 0 && px(80, 120) == Some(CA) && px(380, 250) == Some(CB) {
+            if px(240, 160) != Some(CB) {
+                return Err("gui_two_windows: sobreposicao deveria mostrar B (criada por ultimo)");
+            }
+            if px(20, 20) != Some(DESKTOP_BG) || px(500, 400) != Some(DESKTOP_BG) {
+                return Err("gui_two_windows: fundo da area de trabalho ausente fora das janelas");
+            }
+            // Click A's exposed area: move the cursor to (80,120), press and release left.
+            for b in [0x28, 80, (-120i8) as u8, 0x09, 0, 0, 0x08, 0, 0] {
+                crate::kbd::route_byte(b, true);
+            }
+            stage = 1;
+        } else if stage == 1 && px(240, 160) == Some(CA) {
+            // A raised: still intact elsewhere, B's exposed part unchanged.
+            if px(380, 250) != Some(CB) || px(80, 120) != Some(CA) {
+                return Err("gui_two_windows: apos o clique, areas exclusivas mudaram");
+            }
+            // ESC (make/break) reaches the focused window (A) and ends the demo.
+            crate::kbd::route_byte(0x01, false);
+            crate::kbd::route_byte(0x81, false);
+            stage = 2;
+        }
+    }
+    crate::kprintln!(
+        "gui_two_windows: stage {} px A={:?} B={:?} ov={:?}",
+        stage,
+        px(80, 120),
+        px(380, 250),
+        px(240, 160)
+    );
+    Err("gui_two_windows nao terminou/recolheu os frames")
 }
 
 /// The GUI demo (target/conformance/gui/hello_win.exe; empty if not built).

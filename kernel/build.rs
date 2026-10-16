@@ -20,6 +20,7 @@ fn main() {
     embed_conformance(&dir, "gui/test_click.exe", "test_click.exe");
     embed_conformance(&dir, "gui/paint_win.exe", "paint_win.exe");
     embed_conformance(&dir, "gui/test_pos.exe", "test_pos.exe");
+    embed_conformance(&dir, "gui/desk_demo.exe", "desk_demo.exe");
 
     // Embed the ntdll.dll produced by `cargo xtask ntdll` (we only copy the
     // artifact: no nested cargo, so no target-lock contention). If it is
