@@ -140,6 +140,7 @@ const TESTS: &[(&str, TestFn)] = &[
     ("gui_hello_window", gui_hello_window),
     ("window_keyboard_echo", window_keyboard_echo),
     ("window_mouse_click", window_mouse_click),
+    ("gui_paint_window", gui_paint_window),
     ("shell_runs_command", shell_runs_command),
     ("shell_unknown_and_help", shell_unknown_and_help),
     ("shell_echo_args", shell_echo_args),
@@ -715,6 +716,90 @@ fn window_mouse_click() -> Result<(), &'static str> {
         }
     }
     Err("window_mouse_click nao terminou/recolheu os frames")
+}
+
+/// The paint demo (target/conformance/gui/paint_win.exe; empty if not built).
+static PAINT_WIN_EXE: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/paint_win.exe"));
+
+/// Drag-to-draw end to end: the cursor is clamped to (0,0), moved to (100,80), the left
+/// button goes down there, then four move packets (dx=+10, button still held) trace
+/// (110..140, 80), the button is released and ESC follows. paint_win.exe paints a 6x6
+/// yellow square at every WM_LBUTTONDOWN and at every WM_MOUSEMOVE with MK_LBUTTON, so
+/// the whole path must be inked, while a point off the path and the post-release
+/// position must not be.
+fn gui_paint_window() -> Result<(), &'static str> {
+    use core::sync::atomic::Ordering;
+    const INK: u32 = 0x00FF_FF00;
+    if !crate::process::have_gui_dlls() || PAINT_WIN_EXE.is_empty() {
+        return Ok(()); // DLLs/paint_win.exe not embedded on this host: skip.
+    }
+    while crate::kbd::try_pop_input_event().is_some() {}
+    if let Some(con) = crate::fbcon::FBCON.lock().as_mut() {
+        con.clear();
+    }
+    // Clamp to (0,0) with saturated packets, then move to (100,80) with no button.
+    for _ in 0..6 {
+        for b in [0xD8, 0, 0] {
+            crate::kbd::route_byte(b, true);
+        }
+    }
+    for b in [0x28, 100, (-80i8) as u8] {
+        crate::kbd::route_byte(b, true);
+    }
+    // Button down (no motion), then 4 moves of dx=+10 with the button held.
+    for b in [0x09, 0, 0] {
+        crate::kbd::route_byte(b, true);
+    }
+    for _ in 0..4 {
+        for b in [0x09, 10, 0] {
+            crate::kbd::route_byte(b, true);
+        }
+    }
+    // Release, then move on (unheld: must not paint), then ESC.
+    for b in [0x08, 0, 0, 0x08, 20, 0] {
+        crate::kbd::route_byte(b, true);
+    }
+    crate::kbd::route_byte(0x01, false);
+    crate::kbd::route_byte(0x81, false);
+    crate::syscall::LAST_TERMINATE_STATUS.store(u64::MAX, Ordering::SeqCst);
+    let before = crate::mem::frames::free_frame_count();
+    crate::process::spawn_exe_image_with_gui(PAINT_WIN_EXE.to_vec(), None)
+        .map_err(|_| "gui_paint_window: spawn falhou")?;
+    for _ in 0..40000 {
+        crate::sched::yield_now();
+        let st = crate::syscall::LAST_TERMINATE_STATUS.load(Ordering::SeqCst);
+        if st != u64::MAX {
+            if (0xC000_7001..=0xC000_700A).contains(&st) {
+                crate::kprintln!("gui_paint_window: loader status {:#x}", st);
+                return Err("gui_paint_window: o loader morreu (import nao resolvido?)");
+            }
+            if st != 0 {
+                crate::kprintln!("gui_paint_window terminou com status {:#x}", st);
+                return Err("gui_paint_window: exit code != 0");
+            }
+            if crate::fbcon::pixel(300, 150) != Some(0x0020_2030) {
+                return Err("gui_paint_window: fundo nao foi pintado");
+            }
+            for x in [100, 110, 120, 130, 140] {
+                if crate::fbcon::pixel(x + 2, 82) != Some(INK) {
+                    return Err("gui_paint_window: trilha do arrasto incompleta");
+                }
+            }
+            if crate::fbcon::pixel(102, 120) == Some(INK) {
+                return Err("gui_paint_window: pixel fora da trilha tambem pintado");
+            }
+            if crate::fbcon::pixel(162, 82) == Some(INK) {
+                return Err("gui_paint_window: pintou com o botao solto");
+            }
+            if crate::mem::frames::free_frame_count() == before {
+                if let Some(con) = crate::fbcon::FBCON.lock().as_mut() {
+                    con.clear();
+                }
+                return Ok(());
+            }
+        }
+    }
+    Err("gui_paint_window nao terminou/recolheu os frames")
 }
 
 /// The `/MT` argv.exe (target/conformance/crt/argv.exe; empty if not built).
